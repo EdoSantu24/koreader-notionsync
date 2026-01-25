@@ -122,11 +122,11 @@ end
 
 function NotionStorage:saveMarkdown(title, content, database_name)
     local filename = self:sanitizeFilename(title, ".md")
-    
+
     -- Ensure database directory exists and get path
     local db_dir = self:ensureDatabaseDirectory(database_name)
     local filepath = ffiUtil.joinPath(db_dir, filename)
-    
+
     local file = io.open(filepath, "w")
     if file then
         file:write(content)
@@ -141,24 +141,24 @@ end
 
 function NotionStorage:saveEpub(title, html_content, database_name, temp_image_dir)
     local filename = self:sanitizeFilename(title, ".epub")
-    
+
     -- Ensure database directory exists and get path
     local db_dir = self:ensureDatabaseDirectory(database_name)
     local filepath = ffiUtil.joinPath(db_dir, filename)
-    
+
     logger.info(string.format("NotionStorage: saveEpub called for '%s'", title))
     logger.info(string.format("NotionStorage: Target filepath: %s", filepath))
-    
+
     -- Load EPUB creator
     local plugin_dir = debug.getinfo(1).source:match("@?(.*/)") or ""
     logger.info(string.format("NotionStorage: Plugin dir: %s", plugin_dir))
-    
+
     local NotionEpub = dofile(plugin_dir .. "epub.lua")
-    
+
     logger.info("NotionStorage: Calling NotionEpub:createEpub")
     local success = NotionEpub:createEpub(title, html_content, filepath, temp_image_dir)
     logger.info(string.format("NotionStorage: createEpub returned: %s", tostring(success)))
-    
+
     if success then
         logger.info("NotionStorage: Saved EPUB", filepath)
         return true, filepath

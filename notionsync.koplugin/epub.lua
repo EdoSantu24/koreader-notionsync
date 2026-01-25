@@ -11,7 +11,7 @@ local NotionEpub = {}
 function NotionEpub:markdownToHtml(title, markdown_content, image_mappings)
     -- Use the markdown library to convert markdown to HTML
     local body_html = markdown_parser(markdown_content)
-    
+
     -- If image_mappings provided, rewrite image URLs in HTML
     if image_mappings then
         for original_url, local_path in pairs(image_mappings) do
@@ -24,7 +24,7 @@ function NotionEpub:markdownToHtml(title, markdown_content, image_mappings)
         end
         logger.dbg("NotionEpub: Rewrote", #image_mappings, "image URLs in HTML")
     end
-    
+
     -- Wrap in full HTML document with styling
     local html = [[
 <!DOCTYPE html>
@@ -33,42 +33,42 @@ function NotionEpub:markdownToHtml(title, markdown_content, image_mappings)
     <meta charset="UTF-8"/>
     <title>]] .. self:escapeHtml(title) .. [[</title>
     <style>
-        body { 
-            font-family: serif; 
-            line-height: 1.6; 
-            margin: 2em; 
+        body {
+            font-family: serif;
+            line-height: 1.6;
+            margin: 2em;
         }
-        h1, h2, h3 { 
-            margin-top: 1.5em; 
+        h1, h2, h3 {
+            margin-top: 1.5em;
         }
-        img { 
-            max-width: 100%; 
-            height: auto; 
+        img {
+            max-width: 100%;
+            height: auto;
         }
-        code { 
-            background: #f4f4f4; 
-            padding: 2px 6px; 
-            border-radius: 3px; 
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
             font-family: monospace;
         }
-        pre { 
-            background: #f4f4f4; 
-            padding: 1em; 
-            overflow-x: auto; 
+        pre {
+            background: #f4f4f4;
+            padding: 1em;
+            overflow-x: auto;
             border-radius: 5px;
         }
         pre code {
             background: transparent;
             padding: 0;
         }
-        blockquote { 
-            border-left: 4px solid #ddd; 
-            margin: 1em 0; 
-            padding-left: 1em; 
-            color: #666; 
+        blockquote {
+            border-left: 4px solid #ddd;
+            margin: 1em 0;
+            padding-left: 1em;
+            color: #666;
         }
-        ul, ol { 
-            margin: 1em 0; 
+        ul, ol {
+            margin: 1em 0;
         }
         li {
             margin: 0.5em 0;
@@ -124,10 +124,10 @@ end
 -- Create EPUB structure using Lua-based archiver (no external dependencies)
 function NotionEpub:createEpub(title, html_content, output_path, images_dir)
     logger.info(string.format("NotionEpub: Starting EPUB creation for '%s' at '%s'", title, output_path))
-    
+
     -- Prepare mimetype content (must be uncompressed and first in zip)
     local mimetype_content = "application/epub+zip"
-    
+
     -- Prepare container.xml
     local container_xml = [[<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -135,7 +135,7 @@ function NotionEpub:createEpub(title, html_content, output_path, images_dir)
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>]]
-    
+
     -- Build image manifest entries
     local image_manifest = ""
     if images_dir then
@@ -157,7 +157,7 @@ function NotionEpub:createEpub(title, html_content, output_path, images_dir)
             logger.dbg(string.format("NotionEpub: Generated manifest for %d images", image_count - 1))
         end
     end
-    
+
     -- Prepare content.opf
     local content_opf = [[<?xml version="1.0"?>
 <package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId">
@@ -173,56 +173,56 @@ function NotionEpub:createEpub(title, html_content, output_path, images_dir)
     <itemref idref="content"/>
   </spine>
 </package>]]
-    
+
     -- Create the archive writer
     local writer = Archiver.Writer:new()
-    
+
     if not writer:open(output_path, "zip") then
         logger.err(string.format("NotionEpub: Failed to open archive for writing: %s", tostring(writer.err)))
         return false
     end
-    
+
     -- Add mimetype (uncompressed, MUST be first and uncompressed for valid EPUB)
     if not writer:setZipCompression("store") then
         logger.err(string.format("NotionEpub: Failed to set store compression: %s", tostring(writer.err)))
         writer:close()
         return false
     end
-    
+
     if not writer:addFileFromMemory("mimetype", mimetype_content, os.time()) then
         logger.err(string.format("NotionEpub: Failed to add mimetype: %s", tostring(writer.err)))
         writer:close()
         return false
     end
-    
+
     -- Switch to deflate compression for remaining files
     if not writer:setZipCompression("deflate") then
         logger.err(string.format("NotionEpub: Failed to set deflate compression: %s", tostring(writer.err)))
         writer:close()
         return false
     end
-    
+
     -- Add META-INF/container.xml
     if not writer:addFileFromMemory("META-INF/container.xml", container_xml, os.time()) then
         logger.err(string.format("NotionEpub: Failed to add container.xml: %s", tostring(writer.err)))
         writer:close()
         return false
     end
-    
+
     -- Add OEBPS/content.opf
     if not writer:addFileFromMemory("OEBPS/content.opf", content_opf, os.time()) then
         logger.err(string.format("NotionEpub: Failed to add content.opf: %s", tostring(writer.err)))
         writer:close()
         return false
     end
-    
+
     -- Add OEBPS/content.xhtml
     if not writer:addFileFromMemory("OEBPS/content.xhtml", html_content, os.time()) then
         logger.err(string.format("NotionEpub: Failed to add content.xhtml: %s", tostring(writer.err)))
         writer:close()
         return false
     end
-    
+
     -- Add images if directory provided
     if images_dir then
         local lfs = require("libs/libkoreader-lfs")
@@ -235,10 +235,10 @@ function NotionEpub:createEpub(title, html_content, output_path, images_dir)
             end
         end
     end
-    
+
     -- Close the archive
     writer:close()
-    
+
     -- Verify the EPUB was created
     local f = io.open(output_path, "r")
     if f then

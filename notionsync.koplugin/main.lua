@@ -396,7 +396,12 @@ function NotionSync:syncNow()
               if img_stats.downloaded > 0 or img_stats.failed > 0 then
                 table.insert(
                   result_lines,
-                  string.format("Images: %d downloaded, %d cached, %d failed", img_stats.downloaded, img_stats.cached, img_stats.failed)
+                  string.format(
+                    "Images: %d downloaded, %d cached, %d failed",
+                    img_stats.downloaded,
+                    img_stats.cached,
+                    img_stats.failed
+                  )
                 )
               end
               image_manager:cleanup()
@@ -410,7 +415,14 @@ function NotionSync:syncNow()
           end
 
           local database = self.selected_databases[db_index]
-          logger.info(string.format("NotionSync: Processing database %d/%d: %s", db_index, total_databases, database.name))
+          logger.info(
+            string.format(
+              "NotionSync: Processing database %d/%d: %s",
+              db_index,
+              total_databases,
+              database.name
+            )
+          )
 
           -- Update progress for this database
           UIManager:close(progress_message)
@@ -424,21 +436,35 @@ function NotionSync:syncNow()
           local success, result = self.api:queryDatabase(database.id, 20)
 
           if not success then
-            logger.warn(string.format("NotionSync: Failed to query database '%s': %s", database.name, result))
+            logger.warn(
+              string.format(
+                "NotionSync: Failed to query database '%s': %s",
+                database.name,
+                result
+              )
+            )
             -- Continue to next database
             UIManager:nextTick(function() processDatabase(db_index + 1) end)
             return
           end
 
           if not result.results or #result.results == 0 then
-            logger.info(string.format("NotionSync: No pages in database '%s'", database.name))
+            logger.info(
+              string.format("NotionSync: No pages in database '%s'", database.name)
+            )
             -- Continue to next database
             UIManager:nextTick(function() processDatabase(db_index + 1) end)
             return
           end
 
           local page_count = #result.results
-          logger.info(string.format("NotionSync: Database '%s' has %d pages", database.name, page_count))
+          logger.info(
+            string.format(
+              "NotionSync: Database '%s' has %d pages",
+              database.name,
+              page_count
+            )
+          )
 
           -- Process pages in this database
           local function processPage(page_index)
@@ -458,7 +484,15 @@ function NotionSync:syncNow()
             -- Update progress message
             UIManager:close(progress_message)
             progress_message = InfoMessage:new {
-              text = T(_ "DB %1/%2: %3 - %4/%5: %6", db_index, total_databases, database.name:sub(1, 15), page_index, page_count, title:sub(1, 20)),
+              text = T(
+                _ "DB %1/%2: %3 - %4/%5: %6",
+                db_index,
+                total_databases,
+                database.name:sub(1, 15),
+                page_index,
+                page_count,
+                title:sub(1, 20)
+              ),
             }
             UIManager:show(progress_message)
             UIManager:forceRePaint()
@@ -490,8 +524,17 @@ function NotionSync:syncNow()
                 local save_success
 
                 if self.output_format == "epub" then
-                  local html_content = NotionEpub:markdownToHtml(title, markdown, image_mappings)
-                  save_success = self.storage:saveEpub(title, html_content, database.name, self.storage:getTempImageDir())
+                  local html_content = NotionEpub:markdownToHtml(
+                    title,
+                    markdown,
+                    image_mappings
+                  )
+                  save_success = self.storage:saveEpub(
+                    title,
+                    html_content,
+                    database.name,
+                    self.storage:getTempImageDir()
+                  )
                 else
                   save_success = self.storage:saveMarkdown(title, markdown, database.name)
                 end

@@ -21,16 +21,16 @@ function ImageManager:new(temp_dir)
     }
     setmetatable(o, self)
     self.__index = self
-    
+
     -- Create temp directory if it doesn't exist
     if not util.pathExists(temp_dir) then
         util.makePath(temp_dir)
         logger.info("ImageManager: Created temp directory at", temp_dir)
     end
-    
+
     -- Clean up any existing files from previous crashed sync
     o:cleanupOldFiles(temp_dir)
-    
+
     return o
 end
 
@@ -55,19 +55,19 @@ function ImageManager:downloadImage(url, page_id, image_index)
         self.stats.cached = self.stats.cached + 1
         return self.image_cache[url]
     end
-    
+
     -- Detect file extension from URL
     local ext = self:getExtensionFromURL(url)
-    
+
     -- Generate sequential filename
     local filename = string.format("image%03d.%s", self.image_counter, ext)
     local filepath = self.temp_dir .. "/" .. filename
-    
+
     logger.info("ImageManager: Downloading image", self.image_counter, "from", url)
-    
+
     -- Download the image
     local success = self:downloadFile(url, filepath)
-    
+
     if success then
         self.stats.downloaded = self.stats.downloaded + 1
         self.image_cache[url] = filepath
@@ -84,17 +84,17 @@ end
 function ImageManager:getExtensionFromURL(url)
     -- Try to extract extension from URL
     local ext = url:match("%.([^%.%?]+)%??[^/]*$")
-    
+
     -- Common image extensions
     local valid_exts = {
         jpg = true, jpeg = true, png = true, gif = true,
         webp = true, svg = true, bmp = true, ico = true
     }
-    
+
     if ext and valid_exts[ext:lower()] then
         return ext:lower()
     end
-    
+
     -- Default to jpg if we can't determine
     return "jpg"
 end
@@ -105,23 +105,23 @@ function ImageManager:downloadFile(url, filepath)
         logger.err("ImageManager: Cannot open file for writing:", filepath)
         return false
     end
-    
+
     -- Set reasonable timeout for image downloads (30 seconds)
     socketutil:set_timeout(30, 30)
-    
+
     local request = {
         url = url,
         method = "GET",
         sink = ltn12.sink.file(file),
     }
-    
+
     local code, headers, status = socket.skip(1, http.request(request))
-    
+
     -- Reset timeout
     socketutil:reset_timeout()
-    
+
     -- Note: ltn12.sink.file() closes the file automatically, no need to close it again
-    
+
     -- Check if download was successful
     if code == 200 then
         logger.dbg("ImageManager: Download successful, HTTP 200")
@@ -140,7 +140,7 @@ end
 
 function ImageManager:cleanup()
     logger.info("ImageManager: Cleaning up temp directory", self.temp_dir)
-    
+
     -- Remove all files in temp directory
     local mode = lfs.attributes(self.temp_dir, "mode")
     if mode == "directory" then
@@ -155,7 +155,7 @@ function ImageManager:cleanup()
                 end
             end
         end
-        
+
         -- Try to remove the directory itself
         local success, err = os.remove(self.temp_dir)
         if success then
@@ -164,7 +164,7 @@ function ImageManager:cleanup()
             logger.warn("ImageManager: Could not remove temp directory:", err)
         end
     end
-    
+
     -- Clear cache
     self.image_cache = {}
 end

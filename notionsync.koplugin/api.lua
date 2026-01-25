@@ -26,10 +26,10 @@ function NotionAPI:apiCall(method, endpoint, body)
         ["Notion-Version"] = self.NOTION_VERSION,
         ["Content-Type"] = "application/json",
     }
-    
+
     local request_body = body and rapidjson.encode(body) or nil
     local sink = {}
-    
+
     local request = {
         method = method,
         url = url,
@@ -37,18 +37,18 @@ function NotionAPI:apiCall(method, endpoint, body)
         sink = ltn12.sink.table(sink),
         protocol = "tlsv1_2",
     }
-    
+
     if request_body then
         request.source = ltn12.source.string(request_body)
         request.headers["Content-Length"] = tostring(#request_body)
     end
-    
+
     socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    
+
     local code, resp_headers, status = socket.skip(1, https.request(request))
-    
+
     socketutil:reset_timeout()
-    
+
     if code == 200 then
         local content = table.concat(sink)
         local ok, result = pcall(rapidjson.decode, content)
@@ -61,14 +61,14 @@ function NotionAPI:apiCall(method, endpoint, body)
     else
         local error_content = table.concat(sink)
         logger.warn("NotionAPI: HTTP error", code, error_content)
-        
+
         -- Try to parse error message from Notion API
         local error_msg = "HTTP " .. tostring(code)
         local ok, error_json = pcall(rapidjson.decode, error_content)
         if ok and error_json and error_json.message then
             error_msg = error_json.message
         end
-        
+
         return false, error_msg
     end
 end
@@ -81,7 +81,7 @@ function NotionAPI:searchDatabases()
         },
         page_size = 20,
     }
-    
+
     return self:apiCall("POST", "/v1/search", body)
 end
 
@@ -89,7 +89,7 @@ function NotionAPI:queryDatabase(database_id, page_size)
     local body = {
         page_size = page_size or 20,
     }
-    
+
     return self:apiCall("POST", "/v1/databases/" .. database_id .. "/query", body)
 end
 
@@ -106,7 +106,7 @@ end
 
 function NotionAPI:getPageTitle(page)
     local title = "Untitled"
-    
+
     if page.properties then
         for prop_name, prop_value in pairs(page.properties) do
             if prop_value.type == "title" and prop_value.title and #prop_value.title > 0 then
@@ -115,7 +115,7 @@ function NotionAPI:getPageTitle(page)
             end
         end
     end
-    
+
     return title
 end
 
