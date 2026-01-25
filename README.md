@@ -11,7 +11,9 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 - [x] Image download caching to avoid redundant downloads
 - [x] Automatic sync history tracking to avoid re-syncing unchanged pages
 - [ ] Sync highlights and annotations from KOReader back to Notion
-- [ ] Automatic synchronization on schedule
+- [ ] Automatic synchronization on schedule or other trigger
+- [ ] sync reading completion percent to notion
+- [ ] set/create custom tag or prop on notion page when 100% read complete
 
 ## Prerequisites
 
