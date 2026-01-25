@@ -50,17 +50,18 @@ jobs:
             echo "IS_TAG=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create plugin archive
-        run: |
-          tar -czf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz \
-            -C . notionsync.koplugin/
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}
-          path: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          path: notionsync.koplugin/
           retention-days: 30
+
+      - name: Create plugin archive for release
+        if: steps.get_version.outputs.IS_TAG == 'true'
+        run: |
+          tar -czf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz \
+            -C . notionsync.koplugin/
 
       - name: Generate changelog
         if: steps.get_version.outputs.IS_TAG == 'true'
@@ -81,22 +82,24 @@ jobs:
           files: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz
           body: |
             # NotionSync KOReader Plugin ${{ steps.get_version.outputs.VERSION }}
-            
+
             ## Installation
-            
+
             1. Download `notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz`
-            2. Extract to your Kobo's KOReader plugins directory:
+            2. Extract to your KOReader plugins directory:
                ```bash
-               tar -xzf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz -C /path/to/kobo/.adds/koreader/plugins/
+               tar -xzf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz -C /path/to/device/.adds/koreader/plugins/
                ```
-            3. Eject your Kobo and restart KOReader
-            
+            3. Eject your device and restart KOReader
+
+            Alternatively, download the artifact zip from this workflow run and extract the `notionsync.koplugin` folder directly to your plugins directory.
+
             ## What's Changed
-            
+
             ${{ steps.changelog.outputs.CHANGELOG }}
-            
+
             ---
-            
+
             **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.ref_name }}
           draft: false
           prerelease: false
