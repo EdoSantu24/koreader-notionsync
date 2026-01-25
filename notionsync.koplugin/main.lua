@@ -505,7 +505,9 @@ function NotionSync:syncNow()
               if blocks_success and blocks_result.results then
                 -- Extract image URLs BEFORE converting to markdown (for EPUB format only)
                 local image_urls = {}
-                if self.output_format == "epub" then image_urls = self.converter:extractImageURLs(blocks_result.results) end
+                if self.output_format == "epub" then
+                  image_urls = self.converter:extractImageURLs(blocks_result.results)
+                end
 
                 -- Download images if EPUB format and images found
                 local image_mappings = {}
