@@ -50,11 +50,16 @@ jobs:
             echo "IS_TAG=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Prepare artifact directory
+        run: |
+          mkdir -p artifact-staging
+          cp -r notionsync.koplugin artifact-staging/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}
-          path: notionsync.koplugin/
+          path: artifact-staging/
           retention-days: 30
 
       - name: Create plugin archive for release
