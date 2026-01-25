@@ -1,0 +1,104 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'  # Triggers on version tags like v1.0.0, v2.1.3, etc.
+
+jobs:
+  lint:
+    name: Lint Lua Code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Lua
+        uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.4"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v4
+
+      - name: Install luacheck
+        run: luarocks install luacheck
+
+      - name: Run luacheck
+        run: luacheck notionsync.koplugin/
+
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag or use commit SHA
+        id: get_version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            echo "IS_TAG=true" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+            echo "IS_TAG=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create plugin archive
+        run: |
+          tar -czf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz \
+            -C . notionsync.koplugin/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}
+          path: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          retention-days: 30
+
+      - name: Generate changelog
+        if: steps.get_version.outputs.IS_TAG == 'true'
+        id: changelog
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+            sed -n "/^## \[${{ steps.get_version.outputs.VERSION }}\]/,/^## \[/p" CHANGELOG.md | sed '$d' >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "CHANGELOG=Release ${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        if: steps.get_version.outputs.IS_TAG == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz
+          body: |
+            # NotionSync KOReader Plugin ${{ steps.get_version.outputs.VERSION }}
+            
+            ## Installation
+            
+            1. Download `notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz`
+            2. Extract to your Kobo's KOReader plugins directory:
+               ```bash
+               tar -xzf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz -C /path/to/kobo/.adds/koreader/plugins/
+               ```
+            3. Eject your Kobo and restart KOReader
+            
+            ## What's Changed
+            
+            ${{ steps.changelog.outputs.CHANGELOG }}
+            
+            ---
+            
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

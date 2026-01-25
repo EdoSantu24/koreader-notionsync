@@ -1,0 +1,25 @@
+# Build artifacts
+*.tar.gz
+*.zip
+
+# Lua compiled files
+*.luac
+
+# OS files
+.DS_Store
+Thumbs.db
+.directory
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local test files
+test_local.lua
+local_config.lua
+
+# Logs
+*.log
