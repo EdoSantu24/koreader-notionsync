@@ -128,6 +128,7 @@ function BlockTree.fetchPage(api, page_id, opts)
 
     enqueue(root, 0)
 
+    local expanded = 0
     local index = 1
     while index <= #queue do
         if opts.should_abort and opts.should_abort() then
@@ -142,6 +143,7 @@ function BlockTree.fetchPage(api, page_id, opts)
         local item = queue[index]
         index = index + 1
 
+        expanded = expanded + 1
         local kids, ferr = fetch_children(api, item.block.id, meta, budget)
         if kids then
             item.block.children = kids
@@ -161,9 +163,16 @@ function BlockTree.fetchPage(api, page_id, opts)
         if opts.progress then opts.progress(meta.requests, #queue) end
     end
 
+    -- `expanded`, not #queue: the queue keeps growing as children are discovered,
+    -- so reporting its length would claim parents were expanded that were never
+    -- reached when the budget ran out. On a device where the log is the only
+    -- diagnostic, a misleading count costs real debugging time.
+    meta.expanded = expanded
+    meta.queued = #queue
+
     logger.info(string.format(
-        "NotionBlockTree: %d request(s), %d parent(s) expanded%s%s",
-        meta.requests, #queue,
+        "NotionBlockTree: %d request(s), %d/%d parent(s) expanded%s%s",
+        meta.requests, expanded, #queue,
         meta.truncated and ", BUDGET EXHAUSTED" or "",
         meta.depth_capped and ", depth capped" or ""))
 

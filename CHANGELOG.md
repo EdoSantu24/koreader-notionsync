@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   battery. Pages that hit the limit are reported in the sync summary
 - API requests now retry on 429 and 5xx with a short bounded backoff. Notion rate
   limits at roughly three requests per second, which one content-heavy page can
-  now breach on its own
+  now breach on its own. Total backoff is capped per sync, because the sleep
+  blocks the UI and there is currently no way to cancel a running sync
 
 ### Fixed
 

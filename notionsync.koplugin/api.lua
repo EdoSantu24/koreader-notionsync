@@ -25,27 +25,52 @@ end
 -- easily and a bare failure would silently cost a table or a whole subtree.
 NotionAPI.MAX_ATTEMPTS = 3
 
-local function is_retryable(code)
+-- socket.sleep BLOCKS KOReader's event loop, and there is currently no way to
+-- cancel a running sync. Without a ceiling, a rate-limited page could retry 40
+-- requests x 3s of backoff and freeze the device for minutes with no escape, so
+-- total sleep is capped per sync. Once spent, requests still happen -- they just
+-- stop waiting between attempts.
+NotionAPI.MAX_TOTAL_RETRY_SLEEP = 20
+
+-- Whether a failure is worth another attempt. Exposed rather than local so the
+-- retry policy is testable: it governs every network call the plugin makes, and
+-- none of that can be exercised on a dev machine.
+function NotionAPI.isRetryable(code)
     if code == 429 then return true end            -- rate limited
     if type(code) ~= "number" then return true end -- socket-level failure
     return code >= 500 and code < 600              -- transient server error
 end
 
+-- Called at the start of each sync so the sleep ceiling is per-sync rather than
+-- per plugin session.
+function NotionAPI:resetRetryBudget()
+    self.retry_sleep_spent = 0
+end
+
+-- Note on retrying POSTs: /v1/search and /v1/databases/{id}/query are POST by
+-- API design but are read-only queries, so replaying one has no side effect.
 function NotionAPI:apiCall(method, endpoint, body)
     local code, sink
 
     for attempt = 1, self.MAX_ATTEMPTS do
         code, sink = self:requestOnce(method, endpoint, body)
-        if not is_retryable(code) then break end
+        if not NotionAPI.isRetryable(code) then break end
 
         if attempt < self.MAX_ATTEMPTS then
-            -- Deliberately short and bounded. Notion's Retry-After can be tens of
-            -- seconds, and blocking the UI that long on an e-reader is worse than
-            -- reporting the failure, so this backs off briefly and gives up.
-            local delay = attempt
-            logger.warn("NotionAPI:", tostring(code), "on", endpoint,
-                "-- retrying in", delay, "s")
-            socket.sleep(delay)
+            local spent = self.retry_sleep_spent or 0
+            local delay = math.min(attempt, self.MAX_TOTAL_RETRY_SLEEP - spent)
+            if delay > 0 then
+                self.retry_sleep_spent = spent + delay
+                logger.warn("NotionAPI:", tostring(code), "on", endpoint,
+                    "-- retrying in", delay, "s")
+                -- Notion's Retry-After is deliberately not honoured: it can be
+                -- tens of seconds, and blocking an e-reader that long is worse
+                -- than reporting the failure. Logged so it is at least visible.
+                socket.sleep(delay)
+            else
+                logger.warn("NotionAPI:", tostring(code), "on", endpoint,
+                    "-- retry sleep budget spent, retrying immediately")
+            end
         end
     end
 

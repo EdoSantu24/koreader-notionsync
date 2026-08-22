@@ -457,6 +457,8 @@ function NotionSync:syncNow(opts)
       -- Wrap in pcall to catch errors
       local ok, err = pcall(function()
         local image_manager = ImageManager:new()
+        -- The retry backoff ceiling is per sync, not per plugin session.
+        self.api:resetRetryBudget()
 
         local total_new = 0
         local total_old = 0
