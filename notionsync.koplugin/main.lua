@@ -20,6 +20,7 @@ local NotionAPI = dofile(plugin_dir .. "api.lua")
 local NotionStorage = dofile(plugin_dir .. "storage.lua")
 local NotionEpub = dofile(plugin_dir .. "epub.lua")
 local NotionXhtml = dofile(plugin_dir .. "xhtml.lua")
+local NotionBlockTree = dofile(plugin_dir .. "blocktree.lua")
 local ImageManager = dofile(plugin_dir .. "imagemanager.lua")
 
 local NotionSync = WidgetContainer:extend {
@@ -33,6 +34,14 @@ function NotionSync:init()
 
   self.selected_databases = self.settings:readSetting "selected_databases" or {}
   self.save_dir = self.settings:readSetting "save_dir" or "/mnt/onboard/notion_sync"
+  -- Nested-block fetching costs one API request per parent, so these bound how
+  -- long a single page can take. Raising the budget fetches more of a deeply
+  -- nested page at the cost of sync time and battery.
+  self.max_depth = self.settings:readSetting "max_depth"
+    or NotionBlockTree.DEFAULT_MAX_DEPTH
+  self.request_budget = self.settings:readSetting "request_budget"
+    or NotionBlockTree.DEFAULT_REQUEST_BUDGET
+
   self.api = NotionAPI:new(self.notion_token)
   self.storage = NotionStorage:new(self.save_dir)
   self.storage:initialize()
@@ -93,6 +102,32 @@ function NotionSync:addToMainMenu(menu_items)
         text = _ "Clear sync history",
         callback = function() self:confirmClearSyncHistory() end,
         separator = true,
+      },
+      {
+        text_func = function()
+          return T(_ "Nested content limit (%1 requests/page)", self.request_budget)
+        end,
+        sub_item_table = {
+          {
+            text = _ "Nested content limit",
+            enabled = false,
+          },
+          {
+            text = _ "20 - fastest, least nesting",
+            checked_func = function() return self.request_budget == 20 end,
+            callback = function() self:setRequestBudget(20) end,
+          },
+          {
+            text = _ "40 - balanced (default)",
+            checked_func = function() return self.request_budget == 40 end,
+            callback = function() self:setRequestBudget(40) end,
+          },
+          {
+            text = _ "100 - most complete, slowest",
+            checked_func = function() return self.request_budget == 100 end,
+            callback = function() self:setRequestBudget(100) end,
+          },
+        },
       },
       {
         text_func = function() return T(_ "Save Directory (%1)", self.save_dir) end,
@@ -190,6 +225,16 @@ function NotionSync:describeBlocks(blocks, image_map)
   end
   if not any then lines[#lines + 1] = "  (empty: no image was embedded)" end
   return table.concat(lines, "\n") .. "\n"
+end
+
+function NotionSync:setRequestBudget(value)
+  self.request_budget = value
+  self.settings:saveSetting("request_budget", value)
+  self.settings:flush()
+  UIManager:show(InfoMessage:new {
+    text = T(_ "Nested content limit set to %1 requests per page.", value),
+    timeout = 2,
+  })
 end
 
 function NotionSync:confirmClearSyncHistory()
@@ -416,6 +461,8 @@ function NotionSync:syncNow(opts)
         local total_new = 0
         local total_old = 0
         local total_failed = 0
+        local total_truncated = 0
+        local total_partial = 0
         local failed_titles = {}
         local unsupported = {}
         local total_databases = #self.selected_databases
@@ -461,6 +508,17 @@ function NotionSync:syncNow(opts)
                 table.insert(result_lines,
                   string.format("%d image(s) too large, skipped", img_stats.skipped_too_large))
               end
+            end
+
+            -- Content that exists in Notion but was not retrieved must be
+            -- reported: the page still looks complete otherwise.
+            if total_truncated > 0 then
+              table.insert(result_lines, string.format(
+                "%d page(s) hit the request limit (raise it in settings)", total_truncated))
+            end
+            if total_partial > 0 then
+              table.insert(result_lines, string.format(
+                "%d page(s) had some nested content unavailable", total_partial))
             end
 
             -- Blocks the renderer did not recognise are reported rather than
@@ -580,19 +638,27 @@ function NotionSync:syncNow(opts)
             local should_sync = not synced_ids[sync_key] or not file_exists
 
             if should_sync then
-              local blocks_success, blocks_result = self.api:getBlockChildren(page.id)
+              -- Fetches nested children too, which is what makes table rows,
+              -- sub-bullets and toggle bodies available at all.
+              local blocks, tree_meta = NotionBlockTree.fetchPage(self.api, page.id, {
+                max_depth = self.max_depth,
+                request_budget = self.request_budget,
+              })
 
-              if not blocks_success or not blocks_result.results then
-                -- A failed block fetch means the page's entire content is
+              if not blocks then
+                -- A failed root fetch means the page's entire content is
                 -- unavailable. Writing a title-only EPUB and recording it as
                 -- synced would freeze that emptiness in place permanently, so
                 -- this counts as a failure and will be retried next sync.
                 logger.warn("NotionSync: Failed to get blocks for page", page.id,
-                  tostring(blocks_result))
+                  tostring(tree_meta.fatal))
                 total_failed = total_failed + 1
                 failed_titles[#failed_titles + 1] = title
               else
-                local blocks = blocks_result.results
+                if tree_meta.truncated then total_truncated = total_truncated + 1 end
+                if #tree_meta.errors > 0 then
+                  total_partial = total_partial + 1
+                end
                 local build_ok, build_err, build_info = NotionEpub:build {
                   title = title,
                   author = database.name,

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Nested content is now fetched.** Notion stores anything nested as a child
+  block, reachable only by another API request per parent, so previously table
+  rows, sub-bullets, and the bodies of toggles, callouts, columns and synced
+  blocks were all unavailable and showed `[... not fetched]` placeholders. New
+  `blocktree.lua` walks the tree breadth-first with a depth cap and a per-page
+  request budget
+- **Nested content limit** setting (20 / 40 / 100 requests per page). Each nested
+  parent costs one API call, so this trades completeness against sync time and
+  battery. Pages that hit the limit are reported in the sync summary
+- API requests now retry on 429 and 5xx with a short bounded backoff. Notion rate
+  limits at roughly three requests per second, which one content-heavy page can
+  now breach on its own
+
 ### Fixed
 
 - **List items no longer render at heading size or escape their list.** An `<li>`

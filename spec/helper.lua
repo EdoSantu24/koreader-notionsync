@@ -457,7 +457,7 @@ M.PLUGIN_DIR = PLUGIN_DIR
 
 -- Every non-vendored plugin module, for the syntax check.
 M.PLUGIN_MODULES = {
-    "_meta", "api", "epub", "imagemanager", "main", "storage", "xhtml",
+    "_meta", "api", "blocktree", "epub", "imagemanager", "main", "storage", "xhtml",
 }
 
 _G.helper = M

@@ -45,6 +45,7 @@ local FILES = {
     "notionsync.koplugin/api.lua",
     "notionsync.koplugin/epub.lua",
     "notionsync.koplugin/xhtml.lua",
+    "notionsync.koplugin/blocktree.lua",
     "notionsync.koplugin/imagemanager.lua",
     "notionsync.koplugin/main.lua",
     "notionsync.koplugin/storage.lua",
@@ -55,6 +56,7 @@ local FILES = {
     "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",
+    "spec/blocktree_spec.lua",
 }
 
 --------------------------------------------------------------------------------

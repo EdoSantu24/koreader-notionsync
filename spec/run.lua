@@ -25,6 +25,7 @@ local SPEC_FILES = {
     "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",
+    "spec/blocktree_spec.lua",
 }
 
 --------------------------------------------------------------------------------
