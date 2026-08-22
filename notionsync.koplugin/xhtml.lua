@@ -91,6 +91,9 @@ blockquote { margin: 0.8em 0 0.8em 1em; padding-left: 0.8em;
              border-left: 3px solid #999; font-style: italic; }
 ul, ol { margin: 0.6em 0; padding-left: 1.4em; }
 li { margin: 0.25em 0; }
+/* An item's own text when it also has block children; must not gain paragraph
+   spacing, or items with sub-items would look different from those without. */
+.ns-li-text { margin: 0; font-size: 1em; font-weight: normal; }
 .ns-todo { list-style: none; padding-left: 0.4em; }
 hr { border: none; border-top: 1px solid #999; margin: 1.4em 0; }
 table { border-collapse: collapse; width: 100%; margin: 0.9em 0; font-size: 0.9em; }
@@ -417,35 +420,54 @@ H.table = function(block, ctx)
         if type(cells) == "table" and #cells > width then width = #cells end
     end
 
+    local has_header = payload.has_column_header == true
     local out = { "<table>\n" }
-    for i = 1, #rows do
-        local row = rows[i]
+
+    -- Rows must live inside <thead>/<tbody>. A bare <tr> directly under <table>
+    -- is invalid in XHTML 1.1, and crengine's recovery from an invalid content
+    -- model is to restructure the document -- which is how a stray element ends
+    -- up rendered at the wrong size or outside its parent entirely.
+    local function render_row(row, is_header)
         local cells = {}
         if type(row) == "table" and type(row.table_row) == "table"
             and type(row.table_row.cells) == "table" then
             cells = row.table_row.cells
         end
 
-        local is_header_row = payload.has_column_header == true and i == 1
-        out[#out + 1] = is_header_row and "<thead>\n<tr>" or "<tr>"
-
+        local parts = { "<tr>" }
         for c = 1, width do
             -- Short rows are padded and empty cells still emit a tag: omitting
             -- one shifts every later column in the row.
             local content = type(cells[c]) == "table"
                 and X.renderRichText(cells[c], ctx) or ""
             local tag = "td"
-            if is_header_row then
+            local attr = ""
+            if is_header then
                 tag = "th"
             elseif payload.has_row_header == true and c == 1 then
                 tag = "th"
+                attr = ' scope="row"'
             end
-            local attr = (tag == "th" and not is_header_row) and ' scope="row"' or ""
-            out[#out + 1] = "<" .. tag .. attr .. ">" .. content .. "</" .. tag .. ">"
+            parts[#parts + 1] = "<" .. tag .. attr .. ">" .. content .. "</" .. tag .. ">"
         end
-
-        out[#out + 1] = is_header_row and "</tr>\n</thead>\n" or "</tr>\n"
+        parts[#parts + 1] = "</tr>\n"
+        return table.concat(parts)
     end
+
+    local first_body = 1
+    if has_header then
+        out[#out + 1] = "<thead>\n" .. render_row(rows[1], true) .. "</thead>\n"
+        first_body = 2
+    end
+
+    if first_body <= #rows then
+        out[#out + 1] = "<tbody>\n"
+        for i = first_body, #rows do
+            out[#out + 1] = render_row(rows[i], false)
+        end
+        out[#out + 1] = "</tbody>\n"
+    end
+
     out[#out + 1] = "</table>\n"
     return table.concat(out) .. caption_of(block, ctx)
 end
@@ -599,8 +621,8 @@ local function renderListItem(block, ctx, depth, list_kind)
         text = "<code>" .. X.escapeText(mark) .. "</code> " .. text
     end
 
-    -- Nested lists belong INSIDE the <li>, after its own content, or readers
-    -- render the sublist as a sibling of the parent item.
+    -- Nested content belongs INSIDE the <li>, after the item's own text, or
+    -- readers render the sublist as a sibling of the parent item.
     local kids = ""
     if type(block.children) == "table" and #block.children > 0 then
         kids = renderBlocks(block.children, ctx, depth + 1)
@@ -608,7 +630,16 @@ local function renderListItem(block, ctx, depth, list_kind)
         kids = placeholder(ctx, "nested content not fetched")
     end
 
-    return "<li>" .. text .. (kids ~= "" and ("\n" .. kids) or "") .. "</li>\n"
+    if kids == "" then
+        return "<li>" .. text .. "</li>\n"
+    end
+
+    -- When an item has block-level children, its own text is wrapped so the <li>
+    -- contains only block elements. An <li> holding inline text *directly*
+    -- alongside a block sibling is mixed content, and crengine resolves that by
+    -- restructuring -- which showed up as list items rendering at heading size or
+    -- escaping their list. Wrapping removes the ambiguity.
+    return "<li><p class=\"ns-li-text\">" .. text .. "</p>\n" .. kids .. "</li>\n"
 end
 
 renderBlocks = function(blocks, ctx, depth)

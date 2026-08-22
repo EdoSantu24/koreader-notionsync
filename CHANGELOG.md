@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **List items no longer render at heading size or escape their list.** An `<li>`
+  held inline text directly beside a block sibling, which is mixed content;
+  crengine resolves that by restructuring the document. An item's own text is now
+  wrapped so the `<li>` contains only blocks. This appeared intermittent because
+  it only affected items *with* sub-items, and in Notion that is most often the
+  last item of a list
+- **Table rows are wrapped in `<thead>`/`<tbody>`.** A bare `<tr>` directly under
+  `<table>` is invalid in XHTML 1.1 and triggers the same crengine restructuring
+- Image diagnostics: every image now logs its byte count, header bytes and
+  resolved media type, and AVIF/HEIC are recognised so an unrenderable format is
+  named rather than reported as unidentifiable bytes
+- `Sync one page (debug)` now writes `notionsync-debug.xhtml` and a block outline
+  next to the synced books, so a rendering problem can be inspected instead of
+  guessed at
+
 - **Images now actually appear in EPUBs.** The vendored Markdown parser escaped
   `&` to `&amp;` when writing a URL into `src="..."`, while the code searching for
   that URL used the raw form — so for any Notion pre-signed image URL (which are

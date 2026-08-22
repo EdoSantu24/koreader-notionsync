@@ -60,10 +60,12 @@ function NotionSync:addToMainMenu(menu_items)
       },
       {
         -- On-device iteration is the only way to verify rendering, and a full
-        -- sync takes minutes. This does one page so that loop takes seconds.
+        -- sync takes minutes. This does one page so that loop takes seconds, and
+        -- dumps the generated markup so a rendering problem can be inspected
+        -- rather than guessed at.
         text = _ "Sync one page (debug)",
         callback = function()
-          self:syncNow { max_databases = 1, max_pages = 1 }
+          self:syncNow { max_databases = 1, max_pages = 1, dump_xhtml = true }
         end,
       },
       {
@@ -143,6 +145,51 @@ function NotionSync:showTokenInput()
   }
   UIManager:show(input_dialog)
   input_dialog:onShowKeyboard()
+end
+
+-- Writes a diagnostic file next to the synced books, where it can be copied off
+-- the device over USB.
+function NotionSync:writeDebugFile(name, content)
+  local path = self.save_dir .. "/" .. name
+  local file = io.open(path, "w")
+  if not file then
+    logger.warn("NotionSync: could not write debug file", path)
+    return false
+  end
+  file:write(content)
+  file:close()
+  logger.info("NotionSync: wrote debug file", path)
+  return true
+end
+
+-- A flat outline of what the API actually returned, so a rendering problem can be
+-- traced back to the block structure that produced it.
+function NotionSync:describeBlocks(blocks, image_map)
+  local lines = {}
+  local function walk(list, indent)
+    for _, block in ipairs(list or {}) do
+      local note = ""
+      if block.has_children then
+        local fetched = type(block.children) == "table" and #block.children or 0
+        note = string.format("  has_children=true fetched=%d", fetched)
+      end
+      lines[#lines + 1] = string.format("%s%s%s", indent, tostring(block.type), note)
+      if type(block.children) == "table" then
+        walk(block.children, indent .. "  ")
+      end
+    end
+  end
+  walk(blocks, "")
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "image map:"
+  local any = false
+  for url, href in pairs(image_map or {}) do
+    any = true
+    lines[#lines + 1] = "  " .. href .. "  <-  " .. url:sub(1, 120)
+  end
+  if not any then lines[#lines + 1] = "  (empty: no image was embedded)" end
+  return table.concat(lines, "\n") .. "\n"
 end
 
 function NotionSync:confirmClearSyncHistory()
@@ -556,11 +603,20 @@ function NotionSync:syncNow(opts)
                   image_urls = NotionXhtml.collectImageURLs(blocks),
                   fetch_image = function(url) return image_manager:fetch(url) end,
                   render = function(image_map)
-                    return NotionXhtml.renderPage {
+                    local doc, render_ctx = NotionXhtml.renderPage {
                       title = title,
                       blocks = blocks,
                       image_map = image_map,
                     }
+                    -- The generated markup is otherwise sealed inside the EPUB,
+                    -- which makes a rendering complaint impossible to diagnose
+                    -- without unzipping a book off the device.
+                    if opts.dump_xhtml then
+                      self:writeDebugFile("notionsync-debug.xhtml", doc)
+                      self:writeDebugFile("notionsync-debug-blocks.txt",
+                        self:describeBlocks(blocks, image_map))
+                    end
+                    return doc, render_ctx
                   end,
                 }
 

@@ -31,7 +31,29 @@ local MIME_TO_EXT = {
     ["image/webp"] = "webp",
     ["image/svg+xml"] = "svg",
     ["image/bmp"] = "bmp",
+    ["image/avif"] = "avif",
+    ["image/heic"] = "heic",
 }
+
+-- Formats to reject rather than embed, because embedding one yields an empty
+-- bordered box on the device -- indistinguishable from a plugin fault -- whereas
+-- a text placeholder explains itself.
+--
+-- Deliberately EMPTY. WebP is the obvious candidate, but recent KOReader bundles
+-- libwebp, so disabling it on a hunch could break images that currently work.
+-- The per-image logging below identifies the real format first; add an entry here
+-- only once a format is confirmed unrenderable on the device.
+local UNRENDERABLE_MIME = {}
+
+-- First bytes as hex, for diagnosing what actually came down the wire.
+local function hex_prefix(s, count)
+    count = count or 12
+    local out = {}
+    for i = 1, math.min(count, #s) do
+        out[#out + 1] = string.format("%02X", s:byte(i))
+    end
+    return table.concat(out, " ")
+end
 
 local function normalize_mime(ct)
     if type(ct) ~= "string" then return nil end
@@ -49,6 +71,14 @@ local function sniff_mime(content)
     if content:sub(1, 4) == "GIF8" then return "image/gif" end
     if content:sub(1, 4) == "RIFF" and content:sub(9, 12) == "WEBP" then return "image/webp" end
     if content:sub(1, 2) == "BM" then return "image/bmp" end
+    -- ISO-BMFF container: bytes 5-8 are "ftyp", the brand follows. Recognised so
+    -- that a modern format is named in the log rather than reported as
+    -- unidentifiable bytes.
+    if content:sub(5, 8) == "ftyp" then
+        local brand = content:sub(9, 12)
+        if brand == "avif" or brand == "avis" then return "image/avif" end
+        if brand == "heic" or brand == "heix" or brand == "mif1" then return "image/heic" end
+    end
     local head = content:sub(1, 300):lower()
     if head:find("<svg", 1, true) then return "image/svg+xml" end
     return nil
@@ -60,7 +90,11 @@ end
 function NotionEpub:resolveMime(content, content_type)
     local mime = sniff_mime(content) or normalize_mime(content_type)
     if not mime then return nil end
-    return mime, MIME_TO_EXT[mime]
+    local ext = MIME_TO_EXT[mime]
+    -- Both are required. Returning a mime with no extension would reach
+    -- string.format("img%05d.%s", seq, nil) and abort the whole page.
+    if not ext then return nil end
+    return mime, ext
 end
 
 --------------------------------------------------------------------------------
@@ -292,9 +326,27 @@ function NotionEpub:build(opts)
             logger.warn("NotionEpub: image fetch failed:", tostring(content_type))
         else
             local mime, ext = self:resolveMime(content, content_type)
+
+            -- Logged for every image, because a broken-image box on the device
+            -- gives no clue whether the bytes were truncated, HTML, compressed,
+            -- or a format the reader cannot decode. The byte prefix answers that
+            -- immediately from crash.log.
+            logger.info(string.format(
+                "NotionEpub: image %d bytes, header %q, declared %s, resolved %s",
+                #content, hex_prefix(content), tostring(content_type), tostring(mime)))
+
+            if mime and UNRENDERABLE_MIME[mime] then
+                -- Embedding these produces an empty bordered box rather than a
+                -- picture, which looks like a plugin fault. Saying so is better.
+                info.images_failed = info.images_failed + 1
+                info.unrenderable = (info.unrenderable or 0) + 1
+                logger.warn("NotionEpub: format not renderable by the reader:", mime, url)
+                mime = nil
+            end
+
             if not mime then
                 info.images_failed = info.images_failed + 1
-                logger.warn("NotionEpub: unidentifiable image bytes, skipping:", url)
+                logger.warn("NotionEpub: unusable image, skipping:", url)
             else
                 seq = seq + 1
                 local name = string.format("img%05d.%s", seq, ext)

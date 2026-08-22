@@ -263,6 +263,46 @@ describe("lists", function()
         assert_contains(out, "nested content not fetched")
         assert_true(ctx.placeholders > 0)
     end)
+
+    -- Regression: on-device, list items rendered at heading size or escaped their
+    -- list. Cause was mixed content -- inline text directly beside a block sibling
+    -- inside one <li> -- which crengine resolves by restructuring. Items with
+    -- children must wrap their own text so the <li> holds only blocks.
+    it("an_li_with_block_children_has_no_mixed_content", function()
+        local parent = block("bulleted_list_item", { rich_text = rt("outer") }, {
+            has_children = true,
+            children = { block("paragraph", { rich_text = rt("child") }) },
+        })
+        local out = render({ parent })
+        assert_contains(out, '<li><p class="ns-li-text">outer</p>')
+        assert_not_contains(out, "<li>outer")
+    end)
+
+    it("the_placeholder_case_is_wrapped_too", function()
+        -- This is the common one: in Notion the last item of a list is often the
+        -- one with sub-items, which is why the symptom looked intermittent.
+        local parent = block("bulleted_list_item", { rich_text = rt("last") },
+            { has_children = true })
+        local out = render({ parent })
+        assert_contains(out, '<li><p class="ns-li-text">last</p>')
+    end)
+
+    it("a_plain_item_is_not_needlessly_wrapped", function()
+        local out = render({ block("bulleted_list_item", { rich_text = rt("plain") }) })
+        assert_eq(out, "<ul>\n<li>plain</li>\n</ul>\n")
+    end)
+
+    it("mixed_and_plain_items_in_one_list_stay_well_formed", function()
+        local out = render({
+            block("bulleted_list_item", { rich_text = rt("a") }),
+            block("bulleted_list_item", { rich_text = rt("b") }, { has_children = true }),
+            block("bulleted_list_item", { rich_text = rt("c") }),
+        })
+        local ok, err = h.check_xml("<body>" .. out .. "</body>")
+        assert_true(ok, tostring(err))
+        local _, uls = out:gsub("<ul>", "")
+        assert_eq(uls, 1, "all three items belong to a single list")
+    end)
 end)
 
 --------------------------------------------------------------------------------
@@ -395,6 +435,32 @@ describe("tables", function()
     it("cell_content_is_escaped", function()
         local out = render({ table_block({ { "a < b" } }) })
         assert_contains(out, "a &lt; b")
+    end)
+
+    -- A bare <tr> directly under <table> is invalid in XHTML 1.1, and crengine
+    -- recovers from an invalid content model by restructuring the document.
+    it("rows_are_wrapped_in_thead_and_tbody", function()
+        local out = render({
+            table_block({ { "H" }, { "v1" }, { "v2" } }, { column_header = true }),
+        })
+        assert_contains(out, "<thead>\n<tr><th>H</th></tr>\n</thead>")
+        assert_contains(out, "<tbody>")
+        assert_contains(out, "</tbody>")
+        -- No row may sit outside a section.
+        assert_not_contains(out, "</thead>\n<tr>")
+    end)
+
+    it("a_headerless_table_still_uses_tbody", function()
+        local out = render({ table_block({ { "a" }, { "b" } }) })
+        assert_contains(out, "<tbody>")
+        assert_not_contains(out, "<thead>")
+        assert_not_contains(out, "<table>\n<tr>")
+    end)
+
+    it("a_header_only_table_emits_no_empty_tbody", function()
+        local out = render({ table_block({ { "H" } }, { column_header = true }) })
+        assert_contains(out, "<thead>")
+        assert_not_contains(out, "<tbody>")
     end)
 end)
 
