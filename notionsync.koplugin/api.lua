@@ -160,26 +160,42 @@ function NotionAPI:getBlockChildren(block_id, start_cursor)
     return self:apiCall("GET", endpoint)
 end
 
-function NotionAPI:getDatabaseTitle(database)
-    if database.title and #database.title > 0 and database.title[1].plain_text then
-        return database.title[1].plain_text
+-- Notion splits a title into a separate rich-text object at every formatting or
+-- mention boundary, so reading only [1] truncated at the first one: a page titled
+-- "Chapter **One**" came back as "Chapter ".
+function NotionAPI.plainText(rich_text)
+    if type(rich_text) ~= "table" then return "" end
+    local parts = {}
+    for i = 1, #rich_text do
+        local segment = rich_text[i]
+        if type(segment) == "table" then
+            if type(segment.plain_text) == "string" then
+                parts[#parts + 1] = segment.plain_text
+            elseif type(segment.text) == "table"
+                and type(segment.text.content) == "string" then
+                parts[#parts + 1] = segment.text.content
+            end
+        end
     end
+    return table.concat(parts)
+end
+
+function NotionAPI:getDatabaseTitle(database)
+    local title = NotionAPI.plainText(database and database.title)
+    if title ~= "" then return title end
     return "Untitled"
 end
 
 function NotionAPI:getPageTitle(page)
-    local title = "Untitled"
-
-    if page.properties then
+    if page and type(page.properties) == "table" then
         for _, prop_value in pairs(page.properties) do
-            if prop_value.type == "title" and prop_value.title and #prop_value.title > 0 then
-                title = prop_value.title[1].plain_text or title
-                break
+            if type(prop_value) == "table" and prop_value.type == "title" then
+                local title = NotionAPI.plainText(prop_value.title)
+                if title ~= "" then return title end
             end
         end
     end
-
-    return title
+    return "Untitled"
 end
 
 return NotionAPI

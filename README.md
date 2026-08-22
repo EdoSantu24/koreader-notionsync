@@ -13,6 +13,7 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 - [x] Unsupported Notion blocks are reported, never silently dropped
 - [x] Automatic sync history tracking to avoid re-syncing unchanged pages
 - [x] Table rows, nested lists, and toggle/callout/column contents
+- [x] Non-Latin titles (CJK, Cyrillic, accents) preserved in filenames
 - [ ] Re-sync pages edited in Notion (no `last_edited_time` check yet)
 - [ ] Sync highlights and annotations from KOReader back to Notion
 - [ ] Automatic synchronization on schedule or other trigger

@@ -37,6 +37,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Non-Latin page titles no longer collapse into a single `untitled.epub`.** The
+  filename sanitiser kept only `[%w%s-_]`, and because Lua patterns are
+  byte-oriented and `%w` is ASCII-only, every byte >= 0x80 was deleted: a page
+  titled `读书笔记` became `untitled.epub`, and a second such page silently
+  overwrote the first while both were recorded as synced. Unrecoverable data loss
+- **Two pages whose titles differ only in punctuation no longer overwrite each
+  other.** Filenames are now resolved for a whole database at once, so both sides
+  of a collision get a short page-id suffix. Resolving as a set makes the result
+  independent of the order Notion returns pages in
+- Filenames are truncated on a character boundary within a byte budget, so a long
+  CJK title can no longer leave half a character in the name. Trailing dots and
+  spaces are stripped and reserved Windows names escaped, since the device
+  partition is FAT32 and files get copied off it over USB
+- **Titles are read in full.** Only the first rich-text segment was used, so
+  Notion's split at every formatting or mention boundary truncated the title --
+  `Chapter **One**` became `Chapter `
+
 - **The sync summary no longer disappears when something went wrong.** The dialog
   timeout used `cond and nil or 5`, which in Lua always evaluates to `5` -- so the
   intended stay-on-screen behaviour for failures never worked

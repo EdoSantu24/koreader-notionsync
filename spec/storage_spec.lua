@@ -1,10 +1,11 @@
 --
--- Pins the CURRENT behaviour of filename/directory sanitisation.
+-- Filename sanitisation and sync history.
 --
--- Assertions marked BUG describe real data-loss behaviour that a later PR fixes.
--- They are written as explicit expectations so the fix shows up as a deliberate
--- test change, and so nobody "fixes" the sanitiser by accident and wonders why
--- files moved.
+-- The filename tests used to pin real data loss: the old pattern kept only
+-- `[%w%s-_]` and, because Lua patterns are byte-oriented and `%w` is ASCII-only,
+-- DELETED every byte >= 0x80. A page titled 读书笔记 became `untitled.epub`, and a
+-- second such page silently overwrote the first while both were recorded as
+-- synced. Those assertions now describe the fixed behaviour.
 --
 
 local h = require("spec.helper")
@@ -17,7 +18,7 @@ describe("sanitizeFilename", function()
     end)
 
     -- EPUB is the only output format, so an omitted extension must not produce a
-    -- filename that fileExists() could never match against what saveEpub() writes.
+    -- filename that outputExists() could never match against what is written.
     it("defaults_extension_to_epub", function()
         assert_eq(S:sanitizeFilename("Notes"), "Notes.epub")
     end)
@@ -28,39 +29,145 @@ describe("sanitizeFilename", function()
 
     it("strips_path_separators", function()
         assert_not_contains(S:sanitizeFilename("a/b", ".epub"), "/")
+        assert_not_contains(S:sanitizeFilename("a\\b", ".epub"), "\\")
     end)
 
-    -- BUG: the pattern [^%w%s-_] is byte-oriented, and %w is ASCII-only, so every
-    -- byte >= 0x80 is deleted. A page titled entirely in a non-Latin script loses
-    -- its whole name. Worse, two such pages both become untitled.epub and the
-    -- second silently overwrites the first, with both recorded as synced.
-    it("BUG_cjk_title_collapses_to_untitled", function()
-        assert_eq(S:sanitizeFilename("读书笔记", ".epub"), "untitled.epub")
+    it("preserves_cjk_titles", function()
+        assert_eq(S:sanitizeFilename("读书笔记", ".epub"), "读书笔记.epub")
     end)
 
-    it("BUG_cyrillic_title_collapses_to_untitled", function()
-        assert_eq(S:sanitizeFilename("Проект", ".epub"), "untitled.epub")
+    it("preserves_cyrillic_titles", function()
+        assert_eq(S:sanitizeFilename("Проект", ".epub"), "Проект.epub")
     end)
 
-    it("BUG_accents_are_stripped_from_latin", function()
-        assert_eq(S:sanitizeFilename("Café", ".epub"), "Caf.epub")
+    it("preserves_accented_latin", function()
+        assert_eq(S:sanitizeFilename("Café", ".epub"), "Café.epub")
     end)
 
-    -- BUG: punctuation is deleted rather than replaced, so titles that differ
-    -- only in punctuation collide on one filename.
-    it("BUG_punctuation_only_differences_collide", function()
-        local a = S:sanitizeFilename("Report: Q1", ".epub")
-        local b = S:sanitizeFilename("Report Q1", ".epub")
-        assert_eq(a, b, "distinct titles must not produce the same filename")
-        assert_eq(a, "Report_Q1.epub")
+    it("preserves_mixed_scripts", function()
+        assert_eq(S:sanitizeFilename("読書 notes", ".epub"), "読書_notes.epub")
     end)
 
-    it("BUG_truncation_can_split_a_utf8_sequence", function()
-        -- 60 x 3-byte characters = 180 bytes; a blind :sub(1,100) cuts mid-character.
-        local long = string.rep("图", 60)
-        local out = S:sanitizeFilename(long, ".epub")
-        -- Current code strips all high bytes first, so this collapses instead.
-        assert_eq(out, "untitled.epub")
+    it("falls_back_only_when_nothing_usable_remains", function()
+        assert_eq(S:sanitizeFilename("", ".epub"), "untitled.epub")
+        assert_eq(S:sanitizeFilename("///", ".epub"), "untitled.epub")
+        assert_eq(S:sanitizeFilename(nil, ".epub"), "untitled.epub")
+    end)
+
+    -- The device partition is FAT32 and files get copied off it over USB, so
+    -- Windows' rules apply even though the plugin runs on Linux.
+    it("strips_trailing_dots_and_spaces", function()
+        assert_eq(S:sanitizeFilename("Notes.", ".epub"), "Notes.epub")
+        assert_eq(S:sanitizeFilename("Notes ", ".epub"), "Notes.epub")
+    end)
+
+    it("escapes_reserved_windows_names", function()
+        assert_eq(S:sanitizeFilename("CON", ".epub"), "_CON.epub")
+        assert_eq(S:sanitizeFilename("com1", ".epub"), "_com1.epub")
+    end)
+
+    it("removes_control_characters", function()
+        assert_eq(S:sanitizeFilename("a\1b", ".epub"), "a_b.epub")
+    end)
+
+    it("truncates_long_names_by_bytes", function()
+        local out = S:sanitizeFilename(string.rep("a", 300), ".epub")
+        assert_true(#out <= 90, "name should be bounded, got " .. #out)
+    end)
+
+    -- A blind :sub() would cut a 3-byte character in half, which is invalid on
+    -- some filesystems and renders as a replacement glyph.
+    it("truncation_never_splits_a_utf8_character", function()
+        local out = S:sanitizeFilename(string.rep("图", 100), ".epub")
+        local stem = out:gsub("%.epub$", "")
+        assert_eq(table.concat(h.util.splitToChars(stem)), stem,
+            "truncated name contains an invalid UTF-8 sequence")
+        assert_true(#out <= 90)
+    end)
+end)
+
+-- Collisions are resolved across the whole database at once, so the outcome does
+-- not depend on the order Notion happens to return pages in.
+describe("resolveFilenames", function()
+    it("leaves_unique_names_alone", function()
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111", title = "Alpha" },
+            { id = "bbbbbbbb2222", title = "Beta" },
+        }, ".epub")
+        assert_eq(names["aaaaaaaa1111"], "Alpha.epub")
+        assert_eq(names["bbbbbbbb2222"], "Beta.epub")
+    end)
+
+    -- Previously both became Report_Q1.epub and the second silently overwrote the
+    -- first, with both recorded as synced.
+    it("suffixes_both_sides_of_a_collision", function()
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111", title = "Report: Q1" },
+            { id = "bbbbbbbb2222", title = "Report Q1" },
+        }, ".epub")
+        assert_true(names["aaaaaaaa1111"] ~= names["bbbbbbbb2222"],
+            "colliding pages must get distinct filenames")
+        assert_contains(names["aaaaaaaa1111"], "aaaaaaaa")
+        assert_contains(names["bbbbbbbb2222"], "bbbbbbbb")
+    end)
+
+    it("distinguishes_cjk_pages_that_both_used_to_be_untitled", function()
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111", title = "读书笔记" },
+            { id = "bbbbbbbb2222", title = "日記" },
+        }, ".epub")
+        assert_eq(names["aaaaaaaa1111"], "读书笔记.epub")
+        assert_eq(names["bbbbbbbb2222"], "日記.epub")
+    end)
+
+    -- Order independence is the whole reason names are resolved as a set.
+    it("is_independent_of_input_order", function()
+        local a = { id = "aaaaaaaa1111", title = "Same" }
+        local b = { id = "bbbbbbbb2222", title = "Same" }
+        local forward = S:resolveFilenames({ a, b }, ".epub")
+        local backward = S:resolveFilenames({ b, a }, ".epub")
+        assert_eq(forward["aaaaaaaa1111"], backward["aaaaaaaa1111"])
+        assert_eq(forward["bbbbbbbb2222"], backward["bbbbbbbb2222"])
+    end)
+
+    it("is_stable_across_runs", function()
+        local entries = {
+            { id = "aaaaaaaa1111", title = "Same" },
+            { id = "bbbbbbbb2222", title = "Same" },
+        }
+        local first = S:resolveFilenames(entries, ".epub")
+        local second = S:resolveFilenames(entries, ".epub")
+        assert_eq(first["aaaaaaaa1111"], second["aaaaaaaa1111"])
+    end)
+
+    it("keeps_suffixed_names_within_the_byte_budget", function()
+        local long = string.rep("x", 200)
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111", title = long },
+            { id = "bbbbbbbb2222", title = long },
+        }, ".epub")
+        assert_true(#names["aaaaaaaa1111"] <= 90, tostring(#names["aaaaaaaa1111"]))
+        assert_true(names["aaaaaaaa1111"] ~= names["bbbbbbbb2222"])
+    end)
+
+    it("handles_three_way_collisions", function()
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111", title = "X!" },
+            { id = "bbbbbbbb2222", title = "X?" },
+            { id = "cccccccc3333", title = "X*" },
+        }, ".epub")
+        local seen = {}
+        local count = 0
+        for _, name in pairs(names) do
+            assert_eq(seen[name], nil, "duplicate filename: " .. name)
+            seen[name] = true
+            count = count + 1
+        end
+        assert_eq(count, 3)
+    end)
+
+    it("handles_an_empty_list", function()
+        assert_eq(next(S:resolveFilenames({}, ".epub")), nil)
     end)
 end)
 
@@ -69,8 +176,12 @@ describe("sanitizeDatabaseName", function()
         assert_eq(S:sanitizeDatabaseName("Reading List"), "Reading_List")
     end)
 
-    it("BUG_cjk_database_collapses", function()
-        assert_eq(S:sanitizeDatabaseName("书库"), "untitled_database")
+    it("preserves_cjk_database_names", function()
+        assert_eq(S:sanitizeDatabaseName("书库"), "书库")
+    end)
+
+    it("falls_back_when_empty", function()
+        assert_eq(S:sanitizeDatabaseName(""), "untitled_database")
     end)
 end)
 
@@ -132,25 +243,28 @@ describe("paths", function()
             "/tmp/notion_sync/Reading_List")
     end)
 
+    -- getOutputPath takes an already-resolved filename, not a title: collision
+    -- handling needs the whole database in view and cannot happen here.
+    it("output_path_joins_the_database_dir_and_the_given_filename", function()
+        assert_eq(S:getOutputPath("My_Page.epub", "Reading List"),
+            "/tmp/notion_sync/Reading_List/My_Page.epub")
+    end)
+
+    it("output_path_preserves_a_non_ascii_filename", function()
+        assert_eq(S:getOutputPath("读书笔记.epub", "书库"),
+            "/tmp/notion_sync/书库/读书笔记.epub")
+    end)
+
     -- Images now stream straight into the archive from memory, so there is no
-    -- temp image directory any more -- which is what made every EPUB contain
-    -- every image downloaded so far in the sync.
+    -- temp image directory -- which is what made every EPUB contain every image
+    -- downloaded so far in the sync.
     it("no_temp_image_directory_exists", function()
         assert_eq(S.getTempImageDir, nil)
         assert_eq(S.cleanupTempImages, nil)
     end)
 
-    it("output_path_is_database_dir_plus_epub_filename", function()
-        assert_eq(S:getOutputPath("My Page", "Reading List"),
-            "/tmp/notion_sync/Reading_List/My_Page.epub")
-    end)
-
-    it("output_path_always_ends_in_epub", function()
-        assert_match(S:getOutputPath("Anything", "DB"), "%.epub$")
-    end)
-
-    -- saveEpub used to dofile epub.lua on every single save, which also reloaded
-    -- the 1212-line Markdown parser each time. Writing is the builder's job now.
+    -- saveEpub used to dofile epub.lua on every save, which also reloaded the
+    -- 1212-line Markdown parser each time. Writing is the builder's job now.
     it("storage_no_longer_writes_epubs_itself", function()
         assert_eq(S.saveEpub, nil)
         assert_eq(S.saveMarkdown, nil)
