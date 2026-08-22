@@ -281,11 +281,15 @@ function Archiver.Writer:addPath(entry_root, root, recursive, mtime)
     return true
 end
 
+-- Returns NOTHING, exactly like the real koreader-base Writer:close(), which is
+-- inconsistent with open()/setZipCompression()/addFileFromMemory() (all of which
+-- return true).
+--
+-- This fake previously returned `true`, and that single discrepancy is why the
+-- whole suite passed while EVERY real sync failed with "archive close failed:
+-- nil". A test double that is more generous than reality hides exactly the bug it
+-- should catch. Do not make this return a value.
 function Archiver.Writer:close()
-    if should_fail("close") then
-        self.err = "simulated close failure"
-        return nil
-    end
     self.closed = true
     -- Materialise a real file so that the caller's archive verification and the
     -- .part -> final rename both run against something that actually exists.
@@ -296,7 +300,7 @@ function Archiver.Writer:close()
             f:close()
         end
     end
-    return true
+    -- No return value, matching the real API. See the comment above.
 end
 
 M.Archiver = Archiver

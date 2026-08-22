@@ -78,7 +78,16 @@ local MAX_DEPTH_GUARD = 12 -- structural backstop against a cyclic block tree
 
 X.STYLESHEET = [[
 body { font-family: serif; line-height: 1.5; margin: 0.6em; }
+/* Explicit sizes matter. Without them crengine applies its own heading defaults,
+   which are far larger than Notion's visually modest headings -- so a Notion
+   heading_3 sitting between two groups of bullets looked like a bullet that had
+   turned into a giant heading. These keep the on-device hierarchy close to how
+   the page looks in Notion. */
 h1, h2, h3 { line-height: 1.25; margin: 1.1em 0 0.5em; }
+h1 { font-size: 1.35em; }
+h2 { font-size: 1.18em; }
+h3 { font-size: 1.05em; }
+h1.ns-title { font-size: 1.5em; margin-top: 0; }
 p { margin: 0.6em 0; }
 img { max-width: 100%; height: auto; }
 figure, .ns-figure { margin: 1em 0; text-align: center; }

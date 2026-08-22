@@ -56,6 +56,12 @@ local function capped_sink(chunks, limit, state)
     end
 end
 
+-- Transient socket-level failures seen against Notion's S3 host when several
+-- images are fetched back to back -- "Operation already in progress" (EALREADY)
+-- being the common one. These succeed on a retry, so a single failed attempt
+-- must not cost the image.
+ImageManager.MAX_ATTEMPTS = 3
+
 -- Returns content, content_type on success; nil, reason on failure.
 function ImageManager:fetch(url)
     if type(url) ~= "string" or url == "" then
@@ -63,6 +69,34 @@ function ImageManager:fetch(url)
         return nil, "empty url"
     end
 
+    local content, reason
+    for attempt = 1, self.MAX_ATTEMPTS do
+        content, reason = self:fetchOnce(url)
+        if content then
+            if attempt > 1 then
+                logger.info("ImageManager: succeeded on attempt", attempt)
+            end
+            self.stats.downloaded = self.stats.downloaded + 1
+            self.stats.bytes = self.stats.bytes + #content
+            return content, reason -- reason carries content_type on success
+        end
+        if reason == "image too large" then break end -- retrying cannot help
+        if attempt < self.MAX_ATTEMPTS then
+            logger.warn("ImageManager: attempt", attempt, "failed:", tostring(reason),
+                "-- retrying")
+            -- A short pause lets a half-open connection clear; without it the
+            -- retry tends to hit the same error immediately.
+            socket.sleep(attempt)
+        end
+    end
+
+    self.stats.failed = self.stats.failed + 1
+    logger.warn("ImageManager: giving up after", self.MAX_ATTEMPTS, "attempts:", url)
+    return nil, reason
+end
+
+-- One attempt. Returns content, content_type on success; nil, reason on failure.
+function ImageManager:fetchOnce(url)
     local chunks = {}
     local state = { size = 0, too_large = false }
 
@@ -84,8 +118,9 @@ function ImageManager:fetch(url)
         return nil, "image too large"
     end
 
+    -- Stat counters live in fetch(), not here: incrementing per attempt would
+    -- count one image as several failures.
     if code ~= 200 then
-        self.stats.failed = self.stats.failed + 1
         logger.warn("ImageManager: download failed, code:", tostring(code), "url:", url)
         return nil, "http " .. tostring(code)
     end
@@ -94,7 +129,6 @@ function ImageManager:fetch(url)
     if #content == 0 then
         -- A 200 with no body is a failure, not an empty image. Treating it as
         -- success would put a zero-byte entry in the EPUB manifest.
-        self.stats.failed = self.stats.failed + 1
         logger.warn("ImageManager: empty body for", url)
         return nil, "empty response body"
     end
@@ -107,8 +141,6 @@ function ImageManager:fetch(url)
         content_type = headers["content-type"] or headers["Content-Type"]
     end
 
-    self.stats.downloaded = self.stats.downloaded + 1
-    self.stats.bytes = self.stats.bytes + #content
     logger.dbg("ImageManager: fetched", #content, "bytes,", tostring(content_type))
     return content, content_type
 end

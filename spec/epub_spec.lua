@@ -399,17 +399,37 @@ describe("build_failures", function()
         return ok, reason, out_path
     end
 
-    -- The most important property here: a failed build must never leave a file
-    -- behind, because the caller would otherwise record the page as synced and
-    -- the user would find an unopenable book in their library.
-    it("leaves_no_file_when_the_archive_cannot_be_closed", function()
-        local ok, reason, path = attempt { fail_on = "close" }
-        assert_false(ok)
-        assert_contains(reason, "close")
-        assert_false(h.util.pathExists(path))
-        assert_false(h.util.pathExists(path .. ".part"))
+    -- Regression, and the most expensive bug in this project so far: the real
+    -- Writer:close() returns nothing on success, so testing its return value
+    -- treated every page as a failure and deleted its .part file. No EPUB was
+    -- ever written on-device even though the whole suite was green.
+    it("succeeds_even_though_close_returns_no_value", function()
+        h.archives = {}
+        h.archiver_fail_on = nil
+        h.archiver_write_valid = true
+        local out_path = tmpdir .. "/close_nil_test.epub"
+        os.remove(out_path)
+
+        local writer_close_returned
+        local ok, reason = Epub:build {
+            title = "T",
+            page_id = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+            output_path = out_path,
+            image_urls = {},
+            fetch_image = function() return PNG, "image/png" end,
+            render = function() return "<html><body>x</body></html>", { toc = {} } end,
+        }
+        writer_close_returned = h.archives[1]:close()
+
+        assert_eq(writer_close_returned, nil,
+            "the fake must mirror the real API and return nothing")
+        assert_true(ok, "build must not treat a nil close() as failure: " .. tostring(reason))
+        assert_true(h.util.pathExists(out_path))
     end)
 
+    -- A failed build must never leave a file behind, because the caller would
+    -- otherwise record the page as synced and the user would find an unopenable
+    -- book in their library.
     it("leaves_no_file_when_verification_fails", function()
         local ok, reason, path = attempt { write_valid = false }
         assert_false(ok)

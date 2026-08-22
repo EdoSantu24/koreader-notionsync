@@ -396,12 +396,13 @@ function NotionEpub:build(opts)
     }, manifest_images))
     if not ok then return fail(err) end
 
-    -- close() is what writes the central directory, so its result is the
-    -- difference between a valid archive and a truncated one.
-    if not writer:close() then
-        os.remove(part_path)
-        return false, "archive close failed: " .. tostring(writer.err), info
-    end
+    -- Writer:close() returns NOTHING on success -- unlike open(),
+    -- setZipCompression() and addFileFromMemory(), which all return true. The
+    -- binding does not surface archive_write_close's status at all, so there is
+    -- no return value to test. Treating nil as failure here made every single
+    -- page fail with "archive close failed: nil" and deleted its .part file, so
+    -- no EPUB was ever written. The verification below is the real check.
+    writer:close()
 
     local verified, why = self:verifyArchive(part_path)
     if not verified then
