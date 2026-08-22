@@ -21,12 +21,6 @@ describe("syntax", function()
             assert_true(chunk, "failed to compile " .. path .. ": " .. tostring(err))
         end)
     end
-
-    -- Vendored, excluded from luacheck, but it still has to compile.
-    it("markdown_vendored", function()
-        local chunk, err = loadfile(h.PLUGIN_DIR .. "markdown.lua")
-        assert_true(chunk, "failed to compile markdown.lua: " .. tostring(err))
-    end)
 end)
 
 describe("runtime", function()

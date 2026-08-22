@@ -102,15 +102,27 @@ local lfs = {}
 
 function lfs.attributes(path, what)
     local mode = M.fake_fs[path]
+    local real_size = nil
+
     if not mode then
         -- Fall back to a real existence check so tests can point at real files.
-        local f = io.open(path, "r")
-        if f then f:close() mode = "file" end
+        local f = io.open(path, "rb")
+        if f then
+            real_size = f:seek("end")
+            f:close()
+            mode = "file"
+        end
     end
+
     if not mode then return nil end
     if what == "mode" then return mode end
-    if what == "size" then return M.fake_sizes and M.fake_sizes[path] or 0 end
-    return { mode = mode }
+    if what == "size" then
+        -- Prefer the real on-disk size: epub.lua's archive verification depends on
+        -- it, and stubbing it to 0 would make that check untestable.
+        if M.fake_sizes and M.fake_sizes[path] then return M.fake_sizes[path] end
+        return real_size or 0
+    end
+    return { mode = mode, size = real_size or 0 }
 end
 
 function lfs.mkdir(path)
@@ -164,6 +176,37 @@ local Archiver = { Writer = {} }
 -- Reset before each test that inspects archives.
 M.archives = {}
 
+-- Set to a method name ("open", "addFileFromMemory", "close", ...) to make that
+-- call fail once, so error paths can be exercised.
+M.archiver_fail_on = nil
+
+-- Set false to make close() skip writing a verifiable file, simulating a
+-- truncated archive.
+M.archiver_write_valid = true
+
+local function should_fail(name)
+    if M.archiver_fail_on == name then
+        M.archiver_fail_on = nil
+        return true
+    end
+    return false
+end
+
+-- A byte sequence that satisfies epub.lua's verifyArchive: local file header
+-- signature, `mimetype` as the first entry name at offset 30, an
+-- end-of-central-directory signature, and enough length to clear the size floor.
+-- Building a real-looking file means the verification logic is genuinely tested
+-- rather than stubbed away.
+local function verifiable_zip_bytes()
+    return "PK\003\004"
+        .. string.rep("\0", 26)
+        .. "mimetype"
+        .. "application/epub+zip"
+        .. string.rep("\0", 220)
+        .. "PK\005\006"
+        .. string.rep("\0", 18)
+end
+
 function Archiver.Writer:new()
     local o = {
         entries = {},      -- ordered { path, content, compression, mtime }
@@ -179,17 +222,29 @@ function Archiver.Writer:new()
 end
 
 function Archiver.Writer:open(path, format)
+    if should_fail("open") then
+        self.err = "simulated open failure"
+        return nil
+    end
     self.opened = path
     self.format = format
     return true
 end
 
 function Archiver.Writer:setZipCompression(method)
+    if should_fail("setZipCompression") then
+        self.err = "simulated compression failure"
+        return nil
+    end
     self.compression = method
     return true
 end
 
 function Archiver.Writer:addFileFromMemory(entry_path, content, mtime)
+    if should_fail("addFileFromMemory") then
+        self.err = "simulated add failure"
+        return nil
+    end
     self.entries[#self.entries + 1] = {
         path = entry_path,
         content = content,
@@ -198,6 +253,20 @@ function Archiver.Writer:addFileFromMemory(entry_path, content, mtime)
         from = "memory",
     }
     return true
+end
+
+-- Convenience for assertions: entry paths in write order.
+function Archiver.Writer:entryPaths()
+    local paths = {}
+    for _, e in ipairs(self.entries) do paths[#paths + 1] = e.path end
+    return paths
+end
+
+function Archiver.Writer:entry(path)
+    for _, e in ipairs(self.entries) do
+        if e.path == path then return e end
+    end
+    return nil
 end
 
 function Archiver.Writer:addPath(entry_root, root, recursive, mtime)
@@ -213,7 +282,20 @@ function Archiver.Writer:addPath(entry_root, root, recursive, mtime)
 end
 
 function Archiver.Writer:close()
+    if should_fail("close") then
+        self.err = "simulated close failure"
+        return nil
+    end
     self.closed = true
+    -- Materialise a real file so that the caller's archive verification and the
+    -- .part -> final rename both run against something that actually exists.
+    if self.opened and M.archiver_write_valid then
+        local f = io.open(self.opened, "wb")
+        if f then
+            f:write(verifiable_zip_bytes())
+            f:close()
+        end
+    end
     return true
 end
 
@@ -353,7 +435,7 @@ end
 -- Loading plugin modules under test
 --------------------------------------------------------------------------------
 
--- Loads a plugin module by name, e.g. load_plugin("converter").
+-- Loads a plugin module by name, e.g. load_plugin("xhtml").
 --
 -- Uses loadfile with the real on-disk path so that a module's internal
 -- `debug.getinfo(1).source:match "@?(.*/)"` still resolves to the plugin
@@ -371,7 +453,7 @@ M.PLUGIN_DIR = PLUGIN_DIR
 
 -- Every non-vendored plugin module, for the syntax check.
 M.PLUGIN_MODULES = {
-    "_meta", "api", "converter", "epub", "imagemanager", "main", "storage",
+    "_meta", "api", "epub", "imagemanager", "main", "storage", "xhtml",
 }
 
 _G.helper = M

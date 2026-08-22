@@ -6,10 +6,14 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 
 - [x] Sync multiple Notion databases to KOReader folder
 - [x] EPUB (.epub) output, for the richest offline reading experience
-- [x] Preserve rich text formatting (bold, italic, code, links)
+- [x] Preserve rich text formatting (bold, italic, strikethrough, underline, code, links)
 - [x] Embed images in EPUB files for full offline reading
-- [x] Image download caching to avoid redundant downloads
+- [x] Code blocks, quotes, callouts, to-do lists and equations
+- [x] Working table of contents, built from the page's headings
+- [x] Unsupported Notion blocks are reported, never silently dropped
 - [x] Automatic sync history tracking to avoid re-syncing unchanged pages
+- [ ] Table rows, nested lists and toggle/column contents (needs child-block fetching)
+- [ ] Re-sync pages edited in Notion (no `last_edited_time` check yet)
 - [ ] Sync highlights and annotations from KOReader back to Notion
 - [ ] Automatic synchronization on schedule or other trigger
 - [ ] sync reading completion percent to notion
@@ -217,12 +221,20 @@ See [RELEASE.md](RELEASE.md) for detailed instructions on creating releases.
 
 ### Images Not Appearing in EPUB
 
-This is a known bug, not a configuration problem — images are currently not
-embedded at all. The local image path fails to be substituted into the generated
-HTML, so the EPUB keeps a reference to a Notion URL that has already expired.
+Images are embedded as of the latest version. If one is missing you will see a
+`[image failed to download]` placeholder where it should be, and the sync summary
+will report how many failed — images are never silently omitted.
 
-A fix is in progress. Tables and some other Notion blocks are also known to be
-missing; see the repository issues.
+Check that the device had network access for the whole sync, and note that images
+over 8 MB are skipped deliberately.
+
+### Tables Are Empty
+
+Tables show `[table rows not fetched]`. Notion stores table rows as *child*
+blocks, and the plugin does not yet fetch those. The same applies to nested list
+levels and the contents of toggles, callouts and columns — all of which render a
+visible placeholder rather than disappearing. Recursive fetching is the next
+change planned.
 
 ### "DEVICE_MOUNT_PATH is not set" Error (Developers)
 

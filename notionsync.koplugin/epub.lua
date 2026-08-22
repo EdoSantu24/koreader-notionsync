@@ -1,254 +1,373 @@
-local logger = require("logger")
+--
+-- EPUB 2 assembly.
+--
+-- Images are streamed: fetched one at a time and written straight into the archive,
+-- so peak memory is one image rather than a whole page's worth. The previous design
+-- staged them in a shared directory and archived the whole directory per page, which
+-- meant every EPUB contained every image downloaded so far in the sync.
+--
+-- The archive is built at `<path>.part` and only renamed into place after it has been
+-- verified, so the user's library can never contain a truncated .epub. That matters
+-- because the caller records a page as synced on success and never retries it.
+--
 local Archiver = require("ffi/archiver")
+local lfs = require("libs/libkoreader-lfs")
+local logger = require("logger")
 
--- Load the markdown parser library
 local plugin_dir = debug.getinfo(1).source:match "@?(.*/)" or ""
-local markdown_parser = dofile(plugin_dir .. "markdown.lua")
+local Xhtml = dofile(plugin_dir .. "xhtml.lua")
 
 local NotionEpub = {}
 
--- Generate a simple HTML structure from markdown content
-function NotionEpub:markdownToHtml(title, markdown_content, image_mappings)
-    -- Use the markdown library to convert markdown to HTML
-    local body_html = markdown_parser(markdown_content)
+--------------------------------------------------------------------------------
+-- Media types
+--------------------------------------------------------------------------------
 
-    -- If image_mappings provided, rewrite image URLs in HTML
-    if image_mappings then
-        for original_url, local_path in pairs(image_mappings) do
-            -- Escape special regex characters in URL
-            local escaped_url = original_url:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
-            -- Replace src="original_url" with src="local_path"
-            body_html = body_html:gsub('src="' .. escaped_url .. '"', 'src="' .. local_path .. '"')
-            -- Also try single quotes
-            body_html = body_html:gsub("src='" .. escaped_url .. "'", "src='" .. local_path .. "'")
+local MIME_TO_EXT = {
+    ["image/jpeg"] = "jpg",
+    ["image/jpg"] = "jpg",
+    ["image/png"] = "png",
+    ["image/gif"] = "gif",
+    ["image/webp"] = "webp",
+    ["image/svg+xml"] = "svg",
+    ["image/bmp"] = "bmp",
+}
+
+local function normalize_mime(ct)
+    if type(ct) ~= "string" then return nil end
+    ct = ct:lower():gsub(";.*$", ""):gsub("%s", "")
+    return MIME_TO_EXT[ct] and ct or nil
+end
+
+-- Magic bytes are more trustworthy than the header: CDNs serve
+-- application/octet-stream, and a wrong media-type in the OPF manifest is exactly
+-- the sort of thing that makes a reader discard the image (or the document).
+local function sniff_mime(content)
+    if type(content) ~= "string" or #content < 4 then return nil end
+    if content:sub(1, 3) == "\255\216\255" then return "image/jpeg" end
+    if content:sub(1, 8) == "\137PNG\13\10\26\10" then return "image/png" end
+    if content:sub(1, 4) == "GIF8" then return "image/gif" end
+    if content:sub(1, 4) == "RIFF" and content:sub(9, 12) == "WEBP" then return "image/webp" end
+    if content:sub(1, 2) == "BM" then return "image/bmp" end
+    local head = content:sub(1, 300):lower()
+    if head:find("<svg", 1, true) then return "image/svg+xml" end
+    return nil
+end
+
+-- Returns mime, ext, or nil when the bytes cannot be identified as an image at all.
+-- Declining to guess is deliberate: a placeholder in the text beats a broken image
+-- box or, worse, a manifest entry the reader rejects.
+function NotionEpub:resolveMime(content, content_type)
+    local mime = sniff_mime(content) or normalize_mime(content_type)
+    if not mime then return nil end
+    return mime, MIME_TO_EXT[mime]
+end
+
+--------------------------------------------------------------------------------
+-- Identifiers
+--------------------------------------------------------------------------------
+
+-- A *stable* identifier means a re-synced file is recognised as the same book, so
+-- reading position and bookmarks survive a re-sync. The previous code used
+-- os.time(), so every page written in the same second shared a UID.
+function NotionEpub:makeIdentifier(page_id)
+    if type(page_id) == "string" then
+        local hex = page_id:lower():gsub("[^0-9a-f]", "")
+        if #hex == 32 then
+            return "urn:uuid:" .. hex:sub(1, 8) .. "-" .. hex:sub(9, 12) .. "-"
+                .. hex:sub(13, 16) .. "-" .. hex:sub(17, 20) .. "-" .. hex:sub(21, 32)
         end
-        logger.dbg("NotionEpub: Rewrote", #image_mappings, "image URLs in HTML")
+        if page_id ~= "" then return "notion:" .. page_id end
     end
-
-    -- Wrap in full HTML document with styling
-    local html = [[
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-    <meta charset="UTF-8"/>
-    <title>]] .. self:escapeHtml(title) .. [[</title>
-    <style>
-        body {
-            font-family: serif;
-            line-height: 1.6;
-            margin: 2em;
-        }
-        h1, h2, h3 {
-            margin-top: 1.5em;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-        }
-        code {
-            background: #f4f4f4;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: monospace;
-        }
-        pre {
-            background: #f4f4f4;
-            padding: 1em;
-            overflow-x: auto;
-            border-radius: 5px;
-        }
-        pre code {
-            background: transparent;
-            padding: 0;
-        }
-        blockquote {
-            border-left: 4px solid #ddd;
-            margin: 1em 0;
-            padding-left: 1em;
-            color: #666;
-        }
-        ul, ol {
-            margin: 1em 0;
-        }
-        li {
-            margin: 0.5em 0;
-        }
-        a {
-            color: #0066cc;
-            text-decoration: none;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-        hr {
-            border: none;
-            border-top: 2px solid #ddd;
-            margin: 2em 0;
-        }
-    </style>
-</head>
-<body>
-]] .. body_html .. [[
-</body>
-</html>
-]]
-    return html
+    return nil
 end
 
-function NotionEpub:escapeHtml(text)
-    if not text then return "" end
-    text = text:gsub("&", "&amp;")
-    text = text:gsub("<", "&lt;")
-    text = text:gsub(">", "&gt;")
-    text = text:gsub('"', "&quot;")
-    text = text:gsub("'", "&#39;")
-    return text
-end
+--------------------------------------------------------------------------------
+-- Package documents
+--------------------------------------------------------------------------------
 
--- Get MIME type for image file extension
-function NotionEpub:getMimeType(ext)
-    if not ext then return "application/octet-stream" end
-    local mimes = {
-        jpg = "image/jpeg",
-        jpeg = "image/jpeg",
-        png = "image/png",
-        gif = "image/gif",
-        webp = "image/webp",
-        svg = "image/svg+xml",
-        bmp = "image/bmp",
-        ico = "image/x-icon",
-    }
-    return mimes[ext:lower()] or "application/octet-stream"
-end
-
--- Create EPUB structure using Lua-based archiver (no external dependencies)
-function NotionEpub:createEpub(title, html_content, output_path, images_dir)
-    logger.info(string.format("NotionEpub: Starting EPUB creation for '%s' at '%s'", title, output_path))
-
-    -- Prepare mimetype content (must be uncompressed and first in zip)
-    local mimetype_content = "application/epub+zip"
-
-    -- Prepare container.xml
-    local container_xml = [[<?xml version="1.0"?>
+local function container_xml()
+    return [[<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
-</container>]]
+</container>
+]]
+end
 
-    -- Build image manifest entries
-    local image_manifest = ""
-    if images_dir then
-        local lfs = require("libs/libkoreader-lfs")
-        local mode = lfs.attributes(images_dir, "mode")
-        if mode == "directory" then
-            local image_count = 1
-            for file in lfs.dir(images_dir) do
-                if file ~= "." and file ~= ".." then
-                    local ext = file:match("%.([^%.]+)$")
-                    local media_type = self:getMimeType(ext)
-                    image_manifest = image_manifest .. string.format(
-                        '    <item id="img%d" href="images/%s" media-type="%s"/>\n',
-                        image_count, file, media_type
-                    )
-                    image_count = image_count + 1
-                end
-            end
-            logger.dbg(string.format("NotionEpub: Generated manifest for %d images", image_count - 1))
+-- EPUB 2.0.1 requires an NCX and a spine `toc` attribute; without them epubcheck
+-- rejects the file and KOReader's table-of-contents button does nothing.
+local function toc_ncx(title, identifier, toc)
+    local E = Xhtml.escapeText
+    local A = Xhtml.escapeAttr
+    local out = {
+        [[<?xml version="1.0" encoding="utf-8"?>
+<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+<head>
+<meta name="dtb:uid" content="]] .. A(identifier) .. [["/>
+<meta name="dtb:depth" content="2"/>
+<meta name="dtb:totalPageCount" content="0"/>
+<meta name="dtb:maxPageNumber" content="0"/>
+</head>
+<docTitle><text>]] .. E(title) .. [[</text></docTitle>
+<navMap>
+]],
+    }
+
+    local order = 1
+    out[#out + 1] = '<navPoint id="nav0" playOrder="' .. order .. '">'
+        .. "<navLabel><text>" .. E(title) .. "</text></navLabel>"
+        .. '<content src="content.xhtml"/></navPoint>\n'
+
+    for _, entry in ipairs(toc or {}) do
+        -- Only top two heading levels: a deep NCX is unhelpful on a small screen.
+        if entry.level and entry.level <= 2 and entry.text and entry.text ~= "" then
+            order = order + 1
+            out[#out + 1] = '<navPoint id="nav' .. order .. '" playOrder="' .. order .. '">'
+                .. "<navLabel><text>" .. E(entry.text) .. "</text></navLabel>"
+                .. '<content src="content.xhtml#' .. A(entry.anchor) .. '"/></navPoint>\n'
         end
     end
 
-    -- Prepare content.opf
-    local content_opf = [[<?xml version="1.0"?>
+    out[#out + 1] = "</navMap>\n</ncx>\n"
+    return table.concat(out)
+end
+
+local function content_opf(meta, images)
+    local E = Xhtml.escapeText
+    local A = Xhtml.escapeAttr
+
+    local manifest = {
+        '    <item id="content" href="content.xhtml" media-type="application/xhtml+xml"/>\n',
+        '    <item id="css" href="style.css" media-type="text/css"/>\n',
+        '    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>\n',
+    }
+    -- Built from the images that actually succeeded, which is why the OPF is
+    -- written last: a manifest entry for a missing file makes the package invalid.
+    for _, img in ipairs(images) do
+        manifest[#manifest + 1] = string.format(
+            '    <item id="%s" href="%s" media-type="%s"/>\n',
+            A(img.id), A(img.href), A(img.mime))
+    end
+
+    local extra = {}
+    if meta.author and meta.author ~= "" then
+        extra[#extra + 1] = "    <dc:creator>" .. E(meta.author) .. "</dc:creator>\n"
+    end
+    if meta.date and meta.date ~= "" then
+        extra[#extra + 1] = "    <dc:date>" .. E(meta.date) .. "</dc:date>\n"
+    end
+    if meta.source and meta.source ~= "" then
+        extra[#extra + 1] = "    <dc:source>" .. E(meta.source) .. "</dc:source>\n"
+    end
+
+    return [[<?xml version="1.0" encoding="utf-8"?>
 <package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>]] .. self:escapeHtml(title) .. [[</dc:title>
-    <dc:language>en</dc:language>
-    <dc:identifier id="BookId">notion-]] .. os.time() .. [[</dc:identifier>
-  </metadata>
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"
+            xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>]] .. E(meta.title) .. [[</dc:title>
+    <dc:language>]] .. E(meta.language or "en") .. [[</dc:language>
+    <dc:identifier id="BookId">]] .. E(meta.identifier) .. [[</dc:identifier>
+]] .. table.concat(extra) .. [[  </metadata>
   <manifest>
-    <item id="content" href="content.xhtml" media-type="application/xhtml+xml"/>
-]] .. image_manifest .. [[  </manifest>
-  <spine>
+]] .. table.concat(manifest) .. [[  </manifest>
+  <spine toc="ncx">
     <itemref idref="content"/>
   </spine>
-</package>]]
+  <guide>
+    <reference type="text" title="Start" href="content.xhtml"/>
+  </guide>
+</package>
+]]
+end
 
-    -- Create the archive writer
+--------------------------------------------------------------------------------
+-- Verification
+--------------------------------------------------------------------------------
+
+-- io.open() succeeding is not proof of a valid archive -- it is true for a 0-byte
+-- file and for a zip whose central directory was never written. These three checks
+-- catch every truncation mode seen in practice, with no extra dependency.
+function NotionEpub:verifyArchive(path)
+    local size = lfs.attributes(path, "size")
+    if not size then return false, "archive missing after write" end
+    if size < 200 then return false, "archive suspiciously small (" .. size .. " bytes)" end
+
+    local f = io.open(path, "rb")
+    if not f then return false, "archive could not be reopened" end
+    local head = f:read(38) or ""
+    -- Look in the tail rather than at exactly -22: an archive comment, if any,
+    -- sits after the end-of-central-directory record.
+    f:seek("end", -math.min(size, 512))
+    local tail = f:read(512) or ""
+    f:close()
+
+    if head:sub(1, 4) ~= "PK\003\004" then
+        return false, "not a zip archive"
+    end
+    -- OCF requires `mimetype` to be the first entry, uncompressed.
+    if head:sub(31, 38) ~= "mimetype" then
+        return false, "mimetype is not the first archive entry"
+    end
+    if not tail:find("PK\005\006", 1, true) then
+        return false, "end of central directory missing (archive truncated)"
+    end
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- Build
+--------------------------------------------------------------------------------
+
+-- opts = {
+--   title, author, date, language, page_id, source,
+--   output_path,
+--   image_urls  = { url, ... }          ordered, already de-duplicated
+--   fetch_image = function(url) -> content, content_type | nil, reason
+--   render      = function(image_map) -> xhtml_string, render_ctx
+--   on_progress = function(text) -> false to cancel
+-- }
+--
+-- Returns ok, reason_or_nil, info
+--   info = { images_embedded, images_failed, render_ctx }
+function NotionEpub:build(opts)
+    local output_path = opts.output_path
+    local part_path = output_path .. ".part"
+    local mtime = os.time()
+
+    -- Any leftover from an interrupted previous run would otherwise be appended to.
+    os.remove(part_path)
+
     local writer = Archiver.Writer:new()
-
-    if not writer:open(output_path, "zip") then
-        logger.err(string.format("NotionEpub: Failed to open archive for writing: %s", tostring(writer.err)))
-        return false
+    if not writer:open(part_path, "zip") then
+        return false, "could not open archive: " .. tostring(writer.err)
     end
 
-    -- Add mimetype (uncompressed, MUST be first and uncompressed for valid EPUB)
+    local info = { images_embedded = 0, images_failed = 0 }
+
+    local function fail(reason)
+        writer:close()
+        os.remove(part_path)
+        logger.warn("NotionEpub:", reason)
+        return false, reason, info
+    end
+
+    local function add(path, content)
+        if not writer:addFileFromMemory(path, content, mtime) then
+            return false, "could not add " .. path .. ": " .. tostring(writer.err)
+        end
+        return true
+    end
+
+    -- mimetype must be first and stored uncompressed, per the OCF spec.
     if not writer:setZipCompression("store") then
-        logger.err(string.format("NotionEpub: Failed to set store compression: %s", tostring(writer.err)))
-        writer:close()
-        return false
+        return fail("could not select store compression: " .. tostring(writer.err))
     end
+    local ok, err = add("mimetype", "application/epub+zip")
+    if not ok then return fail(err) end
 
-    if not writer:addFileFromMemory("mimetype", mimetype_content, os.time()) then
-        logger.err(string.format("NotionEpub: Failed to add mimetype: %s", tostring(writer.err)))
-        writer:close()
-        return false
-    end
-
-    -- Switch to deflate compression for remaining files
     if not writer:setZipCompression("deflate") then
-        logger.err(string.format("NotionEpub: Failed to set deflate compression: %s", tostring(writer.err)))
-        writer:close()
-        return false
+        return fail("could not select deflate compression: " .. tostring(writer.err))
     end
 
-    -- Add META-INF/container.xml
-    if not writer:addFileFromMemory("META-INF/container.xml", container_xml, os.time()) then
-        logger.err(string.format("NotionEpub: Failed to add container.xml: %s", tostring(writer.err)))
-        writer:close()
-        return false
-    end
+    ok, err = add("META-INF/container.xml", container_xml())
+    if not ok then return fail(err) end
 
-    -- Add OEBPS/content.opf
-    if not writer:addFileFromMemory("OEBPS/content.opf", content_opf, os.time()) then
-        logger.err(string.format("NotionEpub: Failed to add content.opf: %s", tostring(writer.err)))
-        writer:close()
-        return false
-    end
+    -- Images, streamed one at a time. Peak memory is a single image because the
+    -- reference is dropped before the next fetch.
+    local image_map = {}
+    local manifest_images = {}
+    local seq = 0
 
-    -- Add OEBPS/content.xhtml
-    if not writer:addFileFromMemory("OEBPS/content.xhtml", html_content, os.time()) then
-        logger.err(string.format("NotionEpub: Failed to add content.xhtml: %s", tostring(writer.err)))
-        writer:close()
-        return false
-    end
+    for _, url in ipairs(opts.image_urls or {}) do
+        if opts.on_progress and opts.on_progress("image") == false then
+            return fail("cancelled")
+        end
 
-    -- Add images if directory provided
-    if images_dir then
-        local lfs = require("libs/libkoreader-lfs")
-        local mode = lfs.attributes(images_dir, "mode")
-        if mode == "directory" then
-            -- Add the entire images directory
-            if not writer:addPath("OEBPS/images", images_dir, true, os.time()) then
-                logger.warn(string.format("NotionEpub: Failed to add images directory: %s", tostring(writer.err)))
-                -- Don't fail the whole EPUB creation if images fail
+        local content, content_type = opts.fetch_image(url)
+        if not content then
+            -- content_type carries the failure reason in this branch.
+            info.images_failed = info.images_failed + 1
+            logger.warn("NotionEpub: image fetch failed:", tostring(content_type))
+        else
+            local mime, ext = self:resolveMime(content, content_type)
+            if not mime then
+                info.images_failed = info.images_failed + 1
+                logger.warn("NotionEpub: unidentifiable image bytes, skipping:", url)
+            else
+                seq = seq + 1
+                local name = string.format("img%05d.%s", seq, ext)
+                local href = "images/" .. name
+                ok, err = add("OEBPS/" .. href, content)
+                if not ok then return fail(err) end
+
+                manifest_images[#manifest_images + 1] = {
+                    id = string.format("img%05d", seq),
+                    href = href,
+                    mime = mime,
+                }
+                image_map[url] = href
+                info.images_embedded = info.images_embedded + 1
             end
         end
+        content = nil -- luacheck: ignore content
     end
 
-    -- Close the archive
-    writer:close()
-
-    -- Verify the EPUB was created
-    local f = io.open(output_path, "r")
-    if f then
-        f:close()
-        logger.info(string.format("NotionEpub: Successfully created EPUB at %s", output_path))
-        return true
-    else
-        logger.err(string.format("NotionEpub: EPUB file not found after creation: %s", output_path))
-        return false
+    -- Rendered after the images so the placeholders for failed downloads are
+    -- accurate, and before the OPF so the manifest matches what was embedded.
+    local xhtml, render_ctx = opts.render(image_map)
+    info.render_ctx = render_ctx
+    if type(xhtml) ~= "string" or xhtml == "" then
+        return fail("renderer produced no content")
     end
+
+    ok, err = add("OEBPS/style.css", Xhtml.STYLESHEET)
+    if not ok then return fail(err) end
+
+    ok, err = add("OEBPS/content.xhtml", xhtml)
+    if not ok then return fail(err) end
+
+    local identifier = self:makeIdentifier(opts.page_id) or ("notion:" .. tostring(output_path))
+    local toc = render_ctx and render_ctx.toc or {}
+
+    ok, err = add("OEBPS/toc.ncx", toc_ncx(opts.title or "Untitled", identifier, toc))
+    if not ok then return fail(err) end
+
+    ok, err = add("OEBPS/content.opf", content_opf({
+        title = opts.title or "Untitled",
+        author = opts.author,
+        date = opts.date,
+        language = opts.language,
+        source = opts.source,
+        identifier = identifier,
+    }, manifest_images))
+    if not ok then return fail(err) end
+
+    -- close() is what writes the central directory, so its result is the
+    -- difference between a valid archive and a truncated one.
+    if not writer:close() then
+        os.remove(part_path)
+        return false, "archive close failed: " .. tostring(writer.err), info
+    end
+
+    local verified, why = self:verifyArchive(part_path)
+    if not verified then
+        os.remove(part_path)
+        logger.warn("NotionEpub: verification failed:", why)
+        return false, why, info
+    end
+
+    -- os.rename cannot overwrite on some platforms, so clear the target first.
+    os.remove(output_path)
+    local renamed, rename_err = os.rename(part_path, output_path)
+    if not renamed then
+        os.remove(part_path)
+        return false, "could not move archive into place: " .. tostring(rename_err), info
+    end
+
+    logger.info("NotionEpub: wrote", output_path, "with", info.images_embedded, "image(s)")
+    return true, nil, info
 end
 
 return NotionEpub

@@ -455,6 +455,73 @@ describe("containers", function()
 end)
 
 --------------------------------------------------------------------------------
+-- image discovery
+--------------------------------------------------------------------------------
+
+describe("collectImageURLs", function()
+    local function img(url, kind)
+        kind = kind or "file"
+        local payload = { type = kind }
+        payload[kind] = { url = url }
+        return block("image", payload)
+    end
+
+    it("collects_in_document_order", function()
+        local urls = X.collectImageURLs {
+            img("https://a/1.png"),
+            block("paragraph", { rich_text = rt("x") }),
+            img("https://b/2.png"),
+        }
+        assert_eq(#urls, 2)
+        assert_eq(urls[1], "https://a/1.png")
+        assert_eq(urls[2], "https://b/2.png")
+    end)
+
+    it("deduplicates_repeats", function()
+        local urls = X.collectImageURLs { img("https://a/1.png"), img("https://a/1.png") }
+        assert_eq(#urls, 1)
+    end)
+
+    it("finds_both_external_and_file_images", function()
+        local urls = X.collectImageURLs {
+            img("https://a/1.png", "file"),
+            img("https://b/2.png", "external"),
+        }
+        assert_eq(#urls, 2)
+    end)
+
+    -- The previous top-level-only scan never found these, so an image inside a
+    -- toggle, column or table cell was invisible to the downloader.
+    it("recurses_into_children", function()
+        local urls = X.collectImageURLs {
+            block("toggle", { rich_text = rt("t") }, {
+                has_children = true,
+                children = {
+                    img("https://nested/1.png"),
+                    block("column", {}, {
+                        has_children = true,
+                        children = { img("https://deep/2.png") },
+                    }),
+                },
+            }),
+        }
+        assert_eq(#urls, 2)
+        assert_eq(urls[1], "https://nested/1.png")
+        assert_eq(urls[2], "https://deep/2.png")
+    end)
+
+    it("ignores_images_with_no_url", function()
+        assert_eq(#X.collectImageURLs { block("image", { type = "file", file = {} }) }, 0)
+        assert_eq(#X.collectImageURLs { block("image", {}) }, 0)
+    end)
+
+    it("handles_empty_and_bad_input", function()
+        assert_eq(#X.collectImageURLs {}, 0)
+        assert_eq(#X.collectImageURLs(nil), 0)
+    end)
+end)
+
+--------------------------------------------------------------------------------
 -- the mandatory fallback
 --------------------------------------------------------------------------------
 

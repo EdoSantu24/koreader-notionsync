@@ -1,181 +1,116 @@
-local logger = require("logger")
+--
+-- Fetches image bytes for embedding into an EPUB.
+--
+-- This is deliberately stateless about the filesystem. It used to download to a
+-- shared temp directory, which caused every generated EPUB to contain every image
+-- downloaded so far in the sync (page 60 of a run carried all 120 prior images).
+-- Images now go straight into the archive from memory, one at a time, so there is
+-- no directory to over-enumerate and the bug cannot recur.
+--
+-- `socket.http` handles https:// correctly in KOReader -- the bundled LuaSocket
+-- dispatches to ssl.https for port 443 and follows redirects -- so this is the
+-- same module every bundled KOReader plugin uses. Do not "fix" it to ssl.https.
+--
 local socket = require("socket")
 local http = require("socket.http")
-local ltn12 = require("ltn12")
 local socketutil = require("socketutil")
-local lfs = require("libs/libkoreader-lfs")
-local util = require("util")
+local logger = require("logger")
 
 local ImageManager = {}
 
-function ImageManager:new(temp_dir)
+-- Notion images run from a few KB to a couple of MB. The cap exists so that one
+-- pathological attachment cannot exhaust memory mid-sync on a device with no swap;
+-- exceeding it is reported, not silently skipped.
+ImageManager.MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+function ImageManager:new()
     local o = {
-        temp_dir = temp_dir,
-        image_cache = {},
         stats = {
             downloaded = 0,
             failed = 0,
-            cached = 0,
+            skipped_too_large = 0,
+            bytes = 0,
         },
-        image_counter = 1,
     }
     setmetatable(o, self)
     self.__index = self
-
-    -- Create temp directory if it doesn't exist
-    if not util.pathExists(temp_dir) then
-        util.makePath(temp_dir)
-        logger.info("ImageManager: Created temp directory at", temp_dir)
-    end
-
-    -- Clean up any existing files from previous crashed sync
-    o:cleanupOldFiles(temp_dir)
-
     return o
 end
 
-function ImageManager:cleanupOldFiles(temp_dir)
-    local mode = lfs.attributes(temp_dir, "mode")
-    if mode == "directory" then
-        logger.dbg("ImageManager: Cleaning up old temp files in", temp_dir)
-        for entry in lfs.dir(temp_dir) do
-            if entry ~= "." and entry ~= ".." then
-                local entry_path = temp_dir .. "/" .. entry
-                os.remove(entry_path)
-                logger.dbg("ImageManager: Removed old file", entry_path)
+-- An ltn12 sink that accumulates into `chunks` and aborts past `limit`.
+--
+-- Wrapping socketutil.table_sink rather than a raw ltn12 sink matters: only the
+-- socketutil sinks enforce the *total* timeout, so a raw sink would let a slow
+-- trickle hang for the whole block timeout per chunk indefinitely.
+local function capped_sink(chunks, limit, state)
+    local inner = socketutil.table_sink(chunks)
+    return function(chunk, err)
+        if chunk and #chunk > 0 then
+            state.size = state.size + #chunk
+            if state.size > limit then
+                state.too_large = true
+                return nil, "response exceeds size cap"
             end
         end
+        return inner(chunk, err)
     end
 end
 
--- TODO(images): page_id and image_index are accepted but ignored, which is why
--- every image lands in one shared directory keyed only by a session-wide counter
--- -- and therefore why every generated EPUB ends up containing every image
--- downloaded so far in the sync. Scoping images per page is what these two
--- arguments are for. Remove this suppression when that lands.
-function ImageManager:downloadImage(url, page_id, image_index) -- luacheck: ignore page_id image_index
-    -- Check cache first
-    if self.image_cache[url] then
-        logger.dbg("ImageManager: Using cached image for", url)
-        self.stats.cached = self.stats.cached + 1
-        return self.image_cache[url]
-    end
-
-    -- Detect file extension from URL
-    local ext = self:getExtensionFromURL(url)
-
-    -- Generate sequential filename
-    local filename = string.format("image%03d.%s", self.image_counter, ext)
-    local filepath = self.temp_dir .. "/" .. filename
-
-    logger.info("ImageManager: Downloading image", self.image_counter, "from", url)
-
-    -- Download the image
-    local success = self:downloadFile(url, filepath)
-
-    if success then
-        self.stats.downloaded = self.stats.downloaded + 1
-        self.image_cache[url] = filepath
-        self.image_counter = self.image_counter + 1
-        logger.info("ImageManager: Successfully downloaded to", filepath)
-        return filepath
-    else
+-- Returns content, content_type on success; nil, reason on failure.
+function ImageManager:fetch(url)
+    if type(url) ~= "string" or url == "" then
         self.stats.failed = self.stats.failed + 1
-        logger.warn("ImageManager: Failed to download image from", url)
-        return nil
-    end
-end
-
-function ImageManager:getExtensionFromURL(url)
-    -- Try to extract extension from URL
-    local ext = url:match("%.([^%.%?]+)%??[^/]*$")
-
-    -- Common image extensions
-    local valid_exts = {
-        jpg = true, jpeg = true, png = true, gif = true,
-        webp = true, svg = true, bmp = true, ico = true
-    }
-
-    if ext and valid_exts[ext:lower()] then
-        return ext:lower()
+        return nil, "empty url"
     end
 
-    -- Default to jpg if we can't determine
-    return "jpg"
-end
+    local chunks = {}
+    local state = { size = 0, too_large = false }
 
-function ImageManager:downloadFile(url, filepath)
-    local file = io.open(filepath, "wb")
-    if not file then
-        logger.err("ImageManager: Cannot open file for writing:", filepath)
-        return false
-    end
+    -- FILE_* rather than the LARGE_* constants used for API calls: an image is a
+    -- file download and needs a longer total budget than a small JSON response.
+    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
 
-    -- Set reasonable timeout for image downloads (30 seconds)
-    socketutil:set_timeout(30, 30)
-
-    local request = {
+    local code, headers = socket.skip(1, http.request {
         url = url,
         method = "GET",
-        sink = ltn12.sink.file(file),
-    }
+        sink = capped_sink(chunks, self.MAX_IMAGE_BYTES, state),
+    })
 
-    -- The response headers are deliberately dropped for now. They carry
-    -- Content-Type, which is the correct source for the image's media-type --
-    -- currently guessed from the URL instead, which fails on Notion's
-    -- pre-signed URLs. See TODO(images) above.
-    local code, _, status = socket.skip(1, http.request(request))
-
-    -- Reset timeout
     socketutil:reset_timeout()
 
-    -- Note: ltn12.sink.file() closes the file automatically, no need to close it again
-
-    -- Check if download was successful
-    if code == 200 then
-        logger.dbg("ImageManager: Download successful, HTTP 200")
-        return true
-    else
-        -- Download failed, remove partial file
-        logger.warn("ImageManager: Download failed with HTTP code", code or "nil", status or "")
-        os.remove(filepath)
-        return false
-    end
-end
-
-function ImageManager:getImagePath(url)
-    return self.image_cache[url]
-end
-
-function ImageManager:cleanup()
-    logger.info("ImageManager: Cleaning up temp directory", self.temp_dir)
-
-    -- Remove all files in temp directory
-    local mode = lfs.attributes(self.temp_dir, "mode")
-    if mode == "directory" then
-        for entry in lfs.dir(self.temp_dir) do
-            if entry ~= "." and entry ~= ".." then
-                local entry_path = self.temp_dir .. "/" .. entry
-                local success, err = os.remove(entry_path)
-                if success then
-                    logger.dbg("ImageManager: Removed", entry_path)
-                else
-                    logger.warn("ImageManager: Failed to remove", entry_path, err)
-                end
-            end
-        end
-
-        -- Try to remove the directory itself
-        local success, err = os.remove(self.temp_dir)
-        if success then
-            logger.info("ImageManager: Removed temp directory")
-        else
-            logger.warn("ImageManager: Could not remove temp directory:", err)
-        end
+    if state.too_large then
+        self.stats.skipped_too_large = self.stats.skipped_too_large + 1
+        logger.warn("ImageManager: image exceeds", self.MAX_IMAGE_BYTES, "bytes, skipped:", url)
+        return nil, "image too large"
     end
 
-    -- Clear cache
-    self.image_cache = {}
+    if code ~= 200 then
+        self.stats.failed = self.stats.failed + 1
+        logger.warn("ImageManager: download failed, code:", tostring(code), "url:", url)
+        return nil, "http " .. tostring(code)
+    end
+
+    local content = table.concat(chunks)
+    if #content == 0 then
+        -- A 200 with no body is a failure, not an empty image. Treating it as
+        -- success would put a zero-byte entry in the EPUB manifest.
+        self.stats.failed = self.stats.failed + 1
+        logger.warn("ImageManager: empty body for", url)
+        return nil, "empty response body"
+    end
+
+    -- Content-Type is the authoritative source for the media type. The previous
+    -- code guessed from the URL, which fails on Notion pre-signed URLs because
+    -- they contain '/' inside the query string -- so every image was labelled jpg.
+    local content_type
+    if type(headers) == "table" then
+        content_type = headers["content-type"] or headers["Content-Type"]
+    end
+
+    self.stats.downloaded = self.stats.downloaded + 1
+    self.stats.bytes = self.stats.bytes + #content
+    logger.dbg("ImageManager: fetched", #content, "bytes,", tostring(content_type))
+    return content, content_type
 end
 
 function ImageManager:getStats()

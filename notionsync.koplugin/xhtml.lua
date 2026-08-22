@@ -646,6 +646,42 @@ X.renderBlocks = function(blocks, ctx, depth)
 end
 
 --------------------------------------------------------------------------------
+-- Image discovery
+--------------------------------------------------------------------------------
+
+-- Collects image URLs in document order, de-duplicated, recursing into children.
+-- Recursion matters: an image inside a toggle, column or table cell is a child
+-- block, and the previous top-level-only scan never found those at all.
+function X.collectImageURLs(blocks, seen, out, depth)
+    seen = seen or {}
+    out = out or {}
+    depth = depth or 0
+    if type(blocks) ~= "table" or depth > MAX_DEPTH_GUARD then return out end
+
+    for _, block in ipairs(blocks) do
+        if type(block) == "table" then
+            if block.type == "image" and type(block.image) == "table" then
+                local payload = block.image
+                local url
+                if payload.type == "external" and type(payload.external) == "table" then
+                    url = payload.external.url
+                elseif payload.type == "file" and type(payload.file) == "table" then
+                    url = payload.file.url
+                end
+                if type(url) == "string" and url ~= "" and not seen[url] then
+                    seen[url] = true
+                    out[#out + 1] = url
+                end
+            end
+            if type(block.children) == "table" then
+                X.collectImageURLs(block.children, seen, out, depth + 1)
+            end
+        end
+    end
+    return out
+end
+
+--------------------------------------------------------------------------------
 -- Document
 --------------------------------------------------------------------------------
 

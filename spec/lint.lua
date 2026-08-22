@@ -43,8 +43,8 @@ local format = require("luacheck.format")
 local FILES = {
     "notionsync.koplugin/_meta.lua",
     "notionsync.koplugin/api.lua",
-    "notionsync.koplugin/converter.lua",
     "notionsync.koplugin/epub.lua",
+    "notionsync.koplugin/xhtml.lua",
     "notionsync.koplugin/imagemanager.lua",
     "notionsync.koplugin/main.lua",
     "notionsync.koplugin/storage.lua",
@@ -52,7 +52,6 @@ local FILES = {
     "spec/lint.lua",
     "spec/helper.lua",
     "spec/syntax_spec.lua",
-    "spec/converter_spec.lua",
     "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",

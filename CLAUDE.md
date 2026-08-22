@@ -43,19 +43,27 @@ Releases: push to `main` produces a dev artifact; pushing a `v*` tag produces a 
 `main.lua` is the KOReader `WidgetContainer` — settings, menu, and the sync driver. Everything else is a stateless-ish module it orchestrates:
 
 - `api.lua` — Notion REST client (`ssl.https` + `rapidjson`). Pinned to Notion-Version `2022-06-28`.
-- `converter.lua` — Notion block JSON → Markdown, plus `extractImageURLs` for the EPUB path.
-- `epub.lua` — Markdown → styled XHTML, then EPUB 2 zip assembly via KOReader's `ffi/archiver`.
-- `imagemanager.lua` — downloads images to a temp dir, dedupes by URL, tracks download/cache/fail stats.
-- `storage.lua` — filesystem layout, filename sanitisation, sync-history file.
-- `markdown.lua` — **vendored third-party Markdown parser.** Excluded from luacheck in `.luacheckrc`; don't reformat or lint-fix it.
+- `xhtml.lua` — Notion block JSON → XHTML, plus `collectImageURLs`. Owns the escaping chokepoint and the stylesheet. Depends on `logger` only, which is what keeps it unit-testable off-device.
+- `epub.lua` — EPUB 2 assembly via KOReader's `ffi/archiver`: streams images, writes the package documents, verifies the archive.
+- `imagemanager.lua` — fetches image bytes into memory (`fetch(url) -> content, content_type`). Deliberately knows nothing about the filesystem.
+- `storage.lua` — filesystem layout, filename sanitisation, sync-history file. It does **not** write EPUBs; that is `epub.lua`'s job.
+
+There is no Markdown anywhere in the pipeline any more. `converter.lua` and the vendored `markdown.lua` were deleted: routing through a Markdown 1.0.1 parser was the cause of most known bugs, and it cost 1212 lines to keep.
 
 ### Sync data flow
 
-For each selected database → each page: `queryDatabase` → `getBlockChildren` → `extractImageURLs` → `ImageManager:downloadImage` per URL → `pageToMarkdown` → `markdownToHtml` → `saveEpub`.
+For each selected database → each page: `queryDatabase` → `getBlockChildren` → `xhtml.collectImageURLs` → `epub.build{...}`.
 
-Markdown is only an *internal intermediate* on the way to XHTML — there is no Markdown output format. It is also the source of most known bugs (see below) and is slated for removal in favour of rendering blocks straight to XHTML.
+`epub.build` drives the rest through two callbacks the caller supplies, which is what keeps `epub.lua` free of any Notion knowledge and independently testable:
 
-Images are downloaded *before* Markdown conversion. The URL→local-path map is applied by `epub.lua:markdownToHtml`, which string-substitutes `src="<notion url>"` for `src="images/<file>"` in the generated HTML. **This substitution does not work** — see the known bugs below.
+1. `fetch_image(url)` → `ImageManager:fetch`, one image at a time.
+2. `render(image_map)` → `xhtml.renderPage`, called *after* the images so it knows which ones succeeded.
+
+Order matters and is load-bearing. Images are written first so the map is complete; the XHTML is rendered next so placeholders for failed downloads are accurate; the OPF is written **last** so its manifest can only list images that actually made it into the archive. A manifest entry for a missing file is an invalid package.
+
+Images never carry a remote URL into the document — `src` is always a local `images/imgNNNNN.ext` path, and a failed download becomes a visible placeholder. A Notion `file` URL is pre-signed and expires, so leaving one in an offline EPUB is worse than admitting the image is gone.
+
+Peak memory is one image, not a page's worth: each is fetched, written, and dropped before the next. There is deliberately no temp directory — the previous staging directory was archived wholesale per page, so every EPUB ended up containing every image downloaded so far in the sync.
 
 ### Non-blocking sync loop
 
@@ -74,15 +82,20 @@ There is no content-hash or `last_edited_time` check, so **edits in Notion never
 ```
 <save_dir>/                        # default /mnt/onboard/notion_sync (Kobo-specific)
   .synced_ids
-  .notion_image_cache/             # created per sync, deleted after
   <Sanitized_Database_Name>/<Sanitized_Page_Title>.epub
 ```
+
+An EPUB is built at `<name>.epub.part` and renamed into place only after the
+archive verifies, so the library can never contain a truncated book. A stray
+`.part` file means a sync died mid-write; it is safe to delete.
 
 Settings live elsewhere — `DataStorage:getSettingsDir()/notionsync.lua` via `LuaSettings`, not in `save_dir`. Sanitisation strips everything outside `[%w%s-_]` and truncates to 100 chars, so two Notion pages with titles differing only in punctuation collide on one file.
 
 ## Conventions and traps
 
-**Module loading.** KOReader framework modules use `require`; plugin-local files must use `dofile(plugin_dir .. "x.lua")` where `plugin_dir` comes from `debug.getinfo(1).source:match "@?(.*/)"`. `require` cannot resolve files inside the plugin directory. Note `storage.lua` re-`dofile`s `epub.lua` on every save.
+**Module loading.** KOReader framework modules use `require`; plugin-local files must use `dofile(plugin_dir .. "x.lua")` where `plugin_dir` comes from `debug.getinfo(1).source:match "@?(.*/)"`. `require` cannot resolve files inside the plugin directory. Each module is `dofile`d **once** at load; don't reintroduce a per-call `dofile` (`storage.lua` used to do this on every save, reloading a 1212-line parser each time and keeping two divergent module instances alive).
+
+**Escaping has exactly one home.** `xhtml.escapeText` and `xhtml.escapeAttr` are the only functions permitted to prepare caller data for output, and `epub.lua` reuses them for the OPF and NCX. `&` must be substituted first, or later substitutions get double-escaped. Bytes ≥ 0x80 are never inspected, which is what makes the whole thing UTF-8 safe without a `utf8` library.
 
 **Objects.** Hand-rolled prototypes: `Module:new()` sets `setmetatable(o, self); self.__index = self` and returns `o`. There is no inheritance beyond KOReader's `WidgetContainer:extend`.
 
@@ -99,46 +112,40 @@ Update `CHANGELOG.md` under `## [Unreleased]` as part of any user-visible change
 ## Known bugs
 
 These are confirmed and reproduced, not suspicions. Each is **pinned by a test**
-named `BUG_*` in `spec/`, so the fix shows up as a deliberate test change rather
-than an unnoticed shift in output. Don't be surprised by a test that asserts
-broken behaviour — that is the point, and flipping one is how you prove a fix.
+in `spec/`, so the fix shows up as a deliberate test change rather than an
+unnoticed shift in output.
 
-**Images never embed** (`spec/epub_spec.lua`). `markdown.lua`'s `encode_alt`
-escapes `&` → `&amp;` when writing a URL into `src="..."`, but
-`epub.lua:markdownToHtml` builds its search pattern from the *raw* URL. Notion
-pre-signed S3 URLs are full of `&`, so the substitution never matches and the
-EPUB keeps an already-expired remote link. The discriminating pair of tests: a
-URL *without* an ampersand rewrites fine; a real Notion URL does not. Separately,
-`imagemanager.lua:getExtensionFromURL` mis-parses those URLs (they contain `/`
-inside the query string) so every image is labelled `jpg`.
-
-**Tables are impossible**, for three independent reasons (`spec/converter_spec.lua`).
-`converter.lua:blockToMarkdown` is a whitelist with no `else`, and `table`/
-`table_row` are absent, so they return `""` and vanish. Table rows are *children*
-in the Notion API and nothing reads `has_children` or recurses — the `indent`
-parameter exists but no caller passes it. And the vendored parser has no
-pipe-table support at all (`|` appears nowhere in its 1212 lines).
-
-**Silent content loss.** Unhandled block types (callout, toggle, column,
-synced_block, equation, child_page, embed, …) vanish with no log line at all.
-Fenced code blocks are emitted but the parser only understands 4-space-indented
-code, so they leak as literal backticks. `~~strikethrough~~` and `[x]` checkboxes
-render as literal punctuation.
+**Child blocks are never fetched.** `getBlockChildren` is called once per page and
+nothing recurses, so anything Notion stores as a child is unavailable: **table
+rows**, nested list levels, and the bodies of toggles, callouts, columns and
+synced blocks. The renderer handles all of these correctly *when children are
+present* and emits a visible placeholder when they are not, so this shows up as
+`[table rows not fetched]` rather than as silence. Fixing it means recursive
+fetching with a depth cap and a request budget.
 
 **No pagination.** `searchDatabases` caps at 20 databases, `queryDatabase` at 20
 pages per database, `getBlockChildren` at 100 blocks per page, and no
-`next_cursor` is followed anywhere. No `sorts` is sent either, so *which* 20
-pages sync is not stable between runs.
+`next_cursor` is followed anywhere. No `sorts` is sent either, so *which* 20 pages
+sync is not stable between runs. When adding this, note that KOReader's
+`rapidjson` decodes JSON `null` to a lightuserdata sentinel, **not** `nil` — so
+`if res.next_cursor then` is truthy on the last page and loops forever. Test
+`type(cursor) == "string"`. Sort by `created_time` ascending, not
+`last_edited_time`: sorting by a mutable field while paginating lets pages
+reorder between cursor requests, which silently skips or duplicates them.
 
-**Failures are invisible.** Database-query, block-fetch and save failures are all
-log-only; the final dialog has no failure counter and always says "Sync
-complete!". `epub.lua` treats `io.open(path, "r")` as proof of success — true for
-a 0-byte file — and discards `writer:close()`'s return value, so a corrupt EPUB
-gets recorded as synced and is never retried.
+**Edits in Notion never re-sync.** Sync state is keyed on page id alone, with no
+`last_edited_time` comparison, so a page fixed in Notion keeps its stale copy
+forever. `Clear sync history` in the menu is the only way to force a refresh.
 
 **Non-ASCII titles collapse.** `storage.lua:sanitizeFilename` is byte-oriented
 with an ASCII-only `%w`, so `读书笔记` becomes `untitled.epub`. Distinct pages
-overwrite each other while each is recorded as synced.
+overwrite each other while each is recorded as synced. Titles differing only in
+punctuation collide the same way.
+
+**Only the first rich-text segment of a title is read.** `api.lua:getPageTitle`
+takes `title[1].plain_text`, so `Chapter **One**` truncates to `"Chapter "`.
 
 **The `pcall` in `syncNow` covers only the first page.** Every later page runs in
-a fresh `UIManager:nextTick` closure outside it.
+a fresh `UIManager:nextTick` closure outside it, so a mid-sync error escapes
+unprotected. There is also no way to cancel a running sync, and each page forces
+a blocking full-screen e-ink repaint.

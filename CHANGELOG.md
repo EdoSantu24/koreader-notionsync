@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Images now actually appear in EPUBs.** The vendored Markdown parser escaped
+  `&` to `&amp;` when writing a URL into `src="..."`, while the code searching for
+  that URL used the raw form — so for any Notion pre-signed image URL (which are
+  full of `&`) the substitution never matched and every EPUB kept a remote link
+  that had already expired. The renderer now emits local image paths directly;
+  there is no post-hoc string rewrite left to get wrong
+- **Fenced code blocks, strikethrough and to-do checkboxes render properly.** They
+  were previously emitted in Markdown syntax the vendored Markdown 1.0.1 parser
+  did not support, so they appeared as literal backticks, tildes and brackets
+- **Unrecognised Notion blocks no longer vanish silently.** Any block type the
+  renderer does not know is logged, counted, reported in the sync summary, and
+  rendered as a visible placeholder with its text salvaged where possible
+- **A page whose content could not be fetched is no longer recorded as synced**,
+  so it is retried instead of being frozen as permanently empty
+- **A failed or truncated EPUB is never left in the library.** Archives are built
+  as `.part` and renamed only after verification; previously an empty file passed
+  the check, and the page was then marked synced and never retried
+- **Image media types are correct.** They were guessed from the URL, which fails
+  on Notion pre-signed URLs (they contain `/` inside the query string), so every
+  image was labelled JPEG. Now taken from the response and validated against the
+  file's magic bytes
+- **Each EPUB contains only its own images.** Images were staged in one shared
+  directory that was archived wholesale per page, so page 60 of a sync embedded
+  all 120 images downloaded before it
+- **EPUBs are valid EPUB 2.** Added the XML declaration, `toc.ncx` and
+  `<spine toc="ncx">` (so KOReader's table of contents works), plus a stable
+  `dc:identifier` derived from the Notion page id — previously `os.time()`, so
+  every book written in the same second shared an identifier. A stable id also
+  means reading position survives a re-sync
+- Sync failures are now counted and shown, and the summary no longer claims
+  "Sync complete!" when pages failed. The dialog stays on screen when something
+  went wrong instead of vanishing after five seconds
+
+### Added
+
+- `Sync one page (debug)` menu item, which syncs a single page so that on-device
+  verification takes seconds rather than minutes
+- Images larger than 8 MB are skipped and reported rather than risking memory
+  exhaustion mid-sync
+
 ### Removed
+
+- `converter.lua` and the vendored `markdown.lua` (1212 lines). Rendering Notion
+  blocks straight to XHTML removed the need for both, along with the entire class
+  of bug that came from pattern-matching another tool's HTML output
 
 - **The Markdown (.md) output format.** EPUB is now the only output. The format
   setting and its menu are gone, along with `storage:saveMarkdown`. Markdown
