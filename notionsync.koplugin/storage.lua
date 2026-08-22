@@ -60,12 +60,17 @@ function NotionStorage:markAsSynced(page_id)
 end
 
 function NotionStorage:clearSyncHistory()
-    local file = io.open(self.synced_ids_file, "w")
-    if file then
-        file:close()
-        return true
+    local file, err = io.open(self.synced_ids_file, "w")
+    if not file then
+        -- Surfaced to the user, so it must also be diagnosable: on-device there
+        -- is no way to inspect state interactively, only crash.log after the fact.
+        logger.warn("NotionStorage: Could not clear sync history at",
+            self.synced_ids_file, "--", tostring(err))
+        return false, err
     end
-    return false
+    file:close()
+    logger.info("NotionStorage: Cleared sync history at", self.synced_ids_file)
+    return true
 end
 
 function NotionStorage:sanitizeDatabaseName(database_name)
@@ -95,7 +100,10 @@ function NotionStorage:ensureDatabaseDirectory(database_name)
 end
 
 function NotionStorage:sanitizeFilename(title, extension)
-    extension = extension or ".md"
+    -- EPUB is the only output format. A ".md" default used to live here, which
+    -- no caller reaches any more but would silently produce a filename that
+    -- fileExists() could never match against what saveEpub() actually writes.
+    extension = extension or ".epub"
     local safe = title:gsub("[^%w%s-_]", "")
     safe = safe:gsub("%s+", "_")
     if #safe > 100 then
@@ -108,7 +116,7 @@ function NotionStorage:sanitizeFilename(title, extension)
 end
 
 function NotionStorage:fileExists(title, extension, database_name)
-    extension = extension or ".md"
+    extension = extension or ".epub"
     local filename = self:sanitizeFilename(title, extension)
     local db_dir = database_name and self:getDatabaseDirectory(database_name) or self.sync_dir
     local filepath = ffiUtil.joinPath(db_dir, filename)
@@ -118,25 +126,6 @@ function NotionStorage:fileExists(title, extension, database_name)
         return true
     end
     return false
-end
-
-function NotionStorage:saveMarkdown(title, content, database_name)
-    local filename = self:sanitizeFilename(title, ".md")
-
-    -- Ensure database directory exists and get path
-    local db_dir = self:ensureDatabaseDirectory(database_name)
-    local filepath = ffiUtil.joinPath(db_dir, filename)
-
-    local file = io.open(filepath, "w")
-    if file then
-        file:write(content)
-        file:close()
-        logger.info("NotionStorage: Saved", filepath)
-        return true, filepath
-    else
-        logger.warn("NotionStorage: Failed to save", filepath)
-        return false, nil
-    end
 end
 
 function NotionStorage:saveEpub(title, html_content, database_name, temp_image_dir)

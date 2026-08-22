@@ -5,8 +5,8 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 ## Features
 
 - [x] Sync multiple Notion databases to KOReader folder
-- [x] Support for both Markdown (.md) and EPUB (.epub) output formats
-- [x] Preserve rich text formatting (bold, italic, strikethrough, code, links)
+- [x] EPUB (.epub) output, for the richest offline reading experience
+- [x] Preserve rich text formatting (bold, italic, code, links)
 - [x] Embed images in EPUB files for full offline reading
 - [x] Image download caching to avoid redundant downloads
 - [x] Automatic sync history tracking to avoid re-syncing unchanged pages
@@ -49,8 +49,7 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 2. Go to **Tools** → **NotionSync**
 3. Tap **Set Notion Token** and enter your Integration Token
 4. Tap **Select Databases** and choose which databases to sync
-5. (Optional) Change **Output Format** between EPUB (prefered, richest experience) or Markdown
-6. (Optional) Change **Save Directory** to customize where files are saved
+5. (Optional) Change **Save Directory** to customize where files are saved
 
 ## Usage
 
@@ -60,10 +59,17 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 4. Wait for the sync to complete
 5. Your Notion pages will be saved to the configured directory (default: `/mnt/onboard/notion_sync/`)
 
-### Output Formats
+### Output Format
 
-- **Markdown (.md):** Plain text with formatting, external image URLs
-- **EPUB (.epub):** Rich formatted ebooks with embedded images for offline viewing
+Pages are saved as **EPUB (.epub)** — formatted ebooks with images embedded for
+offline reading, one file per Notion page, grouped into a folder per database.
+
+### Forcing a Re-sync
+
+The plugin records which pages it has already synced and skips them. To make it
+fetch everything again, use **Tools → Notion Sync → Clear sync history**. This
+only forgets the history; files already on the device are left alone and will be
+overwritten on the next sync.
 
 ## Development
 
@@ -211,10 +217,12 @@ See [RELEASE.md](RELEASE.md) for detailed instructions on creating releases.
 
 ### Images Not Appearing in EPUB
 
-1. Ensure you're using EPUB format (not Markdown)
-2. Check that images are present in the original Notion page
-3. Verify your device has internet access during sync
-4. Check the sync completion message for failed image downloads
+This is a known bug, not a configuration problem — images are currently not
+embedded at all. The local image path fails to be substituted into the generated
+HTML, so the EPUB keeps a reference to a Notion URL that has already expired.
+
+A fix is in progress. Tables and some other Notion blocks are also known to be
+missing; see the repository issues.
 
 ### "DEVICE_MOUNT_PATH is not set" Error (Developers)
 
