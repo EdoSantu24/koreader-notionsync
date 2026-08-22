@@ -27,6 +27,7 @@ local SPEC_FILES = {
     "spec/epub_spec.lua",
     "spec/blocktree_spec.lua",
     "spec/api_spec.lua",
+    "spec/main_spec.lua",
 }
 
 --------------------------------------------------------------------------------

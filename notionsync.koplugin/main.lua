@@ -7,6 +7,7 @@ local PathChooser = require "ui/widget/pathchooser"
 local UIManager = require "ui/uimanager"
 local WidgetContainer = require "ui/widget/container/widgetcontainer"
 local NetworkMgr = require "ui/network/manager"
+local Trapper = require "ui/trapper"
 local DataStorage = require "datastorage"
 local LuaSettings = require "luasettings"
 local logger = require "logger"
@@ -435,303 +436,389 @@ end
 -- opts.max_pages / opts.max_databases cap the run, which is what the debug
 -- single-page sync uses to make on-device iteration take seconds instead of
 -- minutes.
+--------------------------------------------------------------------------------
+-- Sync
+--------------------------------------------------------------------------------
+
+-- Progress messages are kept to a FIXED shape so Trapper's fast_refresh can reuse
+-- the widget. Trapper repaints only the new widget's own rectangle, so a message
+-- that shrinks leaves ghost pixels behind on e-ink. A constant line count plus a
+-- padded, fixed-width title keeps the geometry stable.
+local PROGRESS_TITLE_WIDTH = 22
+local PROGRESS_DETAIL_WIDTH = 26
+
+-- Truncate to `width` characters and pad to exactly that, without splitting a
+-- UTF-8 sequence. A byte-wise :sub() would cut a multi-byte character in half.
+local function fixed_width(text, width)
+  text = tostring(text or ""):gsub("%s+", " ")
+  local chars = util.splitToChars(text)
+  if #chars > width then
+    local kept = {}
+    for i = 1, width - 1 do
+      kept[i] = chars[i]
+    end
+    return table.concat(kept) .. "\226\128\166" -- U+2026 ellipsis
+  end
+  return text .. string.rep(" ", width - #chars)
+end
+
+function NotionSync:progressText(db, dbs, page, pages, title, detail)
+  return table.concat({
+    T(_ "Database %1/%2", db, dbs),
+    T(_ "Page %1/%2  %3", page, pages, fixed_width(title, PROGRESS_TITLE_WIDTH)),
+    fixed_width(detail, PROGRESS_DETAIL_WIDTH),
+  }, "\n")
+end
+
+-- The single chokepoint for progress display AND cancellation.
+--
+-- Throttled by TIME, not by page count: an unchanged page produces no repaint at
+-- all, while a slow page still shows movement. The cost is that cancellation
+-- latency is bounded by the throttle interval plus the in-flight network timeout
+-- -- the right trade against repainting e-ink on every request.
+function NotionSync:tick(text, force)
+  if not self.sync_alive then return false end
+  local now = os.time()
+  if force or not self.last_tick or now - self.last_tick >= 1 then
+    self.last_tick = now
+    -- fast_refresh everywhere except forced boundaries, where the layout can
+    -- change shape and a full widget replace is safer.
+    if Trapper:info(text, not force) == false then
+      self.sync_alive = false
+      logger.info "NotionSync: cancelled by user"
+    end
+  end
+  return self.sync_alive
+end
+
+-- The Dispatcher action registered in onDispatcherRegisterActions dispatches this
+-- event. Without a handler the registered action silently does nothing, so a
+-- gesture or profile bound to "Notion Sync Now" appears broken.
+function NotionSync:onNotionSyncNow()
+  self:syncNow()
+  return true
+end
+
 function NotionSync:syncNow(opts)
   opts = opts or {}
+
+  -- There are two entry points (the menu and the Dispatcher action), and a sync
+  -- can take minutes. Without this guard a second sync would reset sync_alive,
+  -- silently un-cancelling the first, and both would write the same .part paths.
+  if self.sync_running then
+    UIManager:show(InfoMessage:new {
+      text = _ "A sync is already running.",
+      timeout = 2,
+    })
+    return
+  end
+
+  if #self.selected_databases == 0 then
+    UIManager:show(InfoMessage:new {
+      text = _ "Please select at least one database in Settings",
+      timeout = 3,
+    })
+    return
+  end
+
   NetworkMgr:runWhenOnline(function()
-    -- Validate that user has selected databases
-    if #self.selected_databases == 0 then
-      UIManager:show(InfoMessage:new {
-        text = _ "Please select at least one database in Settings",
-        timeout = 3,
-      })
-      return
-    end
-
-    local progress_message = InfoMessage:new {
-      text = _ "Starting sync...",
-    }
-    UIManager:show(progress_message)
-    UIManager:forceRePaint()
-
+    -- Trapper:wrap must be the LAST thing in the handler: it returns as soon as
+    -- the coroutine first yields, so anything after it would run while the sync
+    -- is only partway through. The nextTick lets runWhenOnline's own dialogs
+    -- settle before Trapper takes over the screen.
     UIManager:nextTick(function()
-      -- Wrap in pcall to catch errors
-      local ok, err = pcall(function()
-        local image_manager = ImageManager:new()
-        -- The retry backoff ceiling is per sync, not per plugin session.
-        self.api:resetRetryBudget()
-
-        local total_new = 0
-        local total_old = 0
-        local total_failed = 0
-        local total_truncated = 0
-        local total_partial = 0
-        local failed_titles = {}
-        local unsupported = {}
-        local total_databases = #self.selected_databases
-        if opts.max_databases and opts.max_databases < total_databases then
-          total_databases = opts.max_databases
-        end
-        local extension = ".epub"
-        local synced_ids = self.storage:getSyncedIds()
-
-        logger.info("NotionSync: Syncing", total_databases, "database(s)")
-
-        -- Process each database sequentially
-        local function processDatabase(db_index)
-          if db_index > total_databases then
-            -- All databases done
-            UIManager:close(progress_message)
-
-            -- The headline must reflect reality: reporting "complete" while pages
-            -- failed is how content loss went unnoticed before.
-            local result_lines = {
-              total_failed > 0 and string.format("Sync finished with %d problem(s)", total_failed)
-                or "Sync complete!",
-              string.format("New: %d   Unchanged: %d", total_new, total_old),
-            }
-
-            if total_failed > 0 then
-              local names = {}
-              for i = 1, math.min(3, #failed_titles) do
-                names[#names + 1] = failed_titles[i]
-              end
-              local suffix = #failed_titles > 3
-                and string.format(", +%d more", #failed_titles - 3) or ""
-              table.insert(result_lines,
-                string.format("Failed: %s%s", table.concat(names, ", "), suffix))
-            end
-
-            local img_stats = image_manager:getStats()
-            if img_stats.downloaded > 0 or img_stats.failed > 0
-              or img_stats.skipped_too_large > 0 then
-              table.insert(result_lines, string.format(
-                "Images: %d embedded, %d failed", img_stats.downloaded, img_stats.failed))
-              if img_stats.skipped_too_large > 0 then
-                table.insert(result_lines,
-                  string.format("%d image(s) too large, skipped", img_stats.skipped_too_large))
-              end
-            end
-
-            -- Content that exists in Notion but was not retrieved must be
-            -- reported: the page still looks complete otherwise.
-            if total_truncated > 0 then
-              table.insert(result_lines, string.format(
-                "%d page(s) hit the request limit (raise it in settings)", total_truncated))
-            end
-            if total_partial > 0 then
-              table.insert(result_lines, string.format(
-                "%d page(s) had some nested content unavailable", total_partial))
-            end
-
-            -- Blocks the renderer did not recognise are reported rather than
-            -- vanishing, so an unhandled Notion feature is discoverable.
-            local unsupported_parts = {}
-            for btype, count in pairs(unsupported) do
-              unsupported_parts[#unsupported_parts + 1] =
-                string.format("%s (%d)", btype, count)
-            end
-            if #unsupported_parts > 0 then
-              table.sort(unsupported_parts)
-              table.insert(result_lines,
-                "Unsupported blocks: " .. table.concat(unsupported_parts, ", "))
-            end
-
-            UIManager:show(InfoMessage:new {
-              text = table.concat(result_lines, "\n"),
-              -- Bad news must not disappear before it can be read.
-              timeout = total_failed > 0 and nil or 5,
-            })
-            return
-          end
-
-          local database = self.selected_databases[db_index]
-          logger.info(
-            string.format(
-              "NotionSync: Processing database %d/%d: %s",
-              db_index,
-              total_databases,
-              database.name
-            )
-          )
-
-          -- Update progress for this database
-          UIManager:close(progress_message)
-          progress_message = InfoMessage:new {
-            text = T(_ "Syncing database %1/%2: %3", db_index, total_databases, database.name),
-          }
-          UIManager:show(progress_message)
-          UIManager:forceRePaint()
-
-          -- Query this database
-          local success, result = self.api:queryDatabase(database.id, 20)
-
-          if not success then
-            logger.warn(
-              string.format(
-                "NotionSync: Failed to query database '%s': %s",
-                database.name,
-                result
-              )
-            )
-            -- A whole database dropping out must be counted, not just logged.
-            total_failed = total_failed + 1
-            failed_titles[#failed_titles + 1] = database.name
-            -- Continue to next database
-            UIManager:nextTick(function() processDatabase(db_index + 1) end)
-            return
-          end
-
-          if not result.results or #result.results == 0 then
-            logger.info(
-              string.format("NotionSync: No pages in database '%s'", database.name)
-            )
-            -- Continue to next database
-            UIManager:nextTick(function() processDatabase(db_index + 1) end)
-            return
-          end
-
-          local page_count = #result.results
-          if opts.max_pages and opts.max_pages < page_count then
-            page_count = opts.max_pages
-          end
-          logger.info(
-            string.format(
-              "NotionSync: Database '%s' has %d pages",
-              database.name,
-              page_count
-            )
-          )
-
-          -- Process pages in this database
-          local function processPage(page_index)
-            if page_index > page_count then
-              -- All pages in this database done, move to next database
-              UIManager:nextTick(function() processDatabase(db_index + 1) end)
-              return
-            end
-
-            local page = result.results[page_index]
-            local title = self.api:getPageTitle(page)
-            -- The ":epub" suffix is retained so that pages already recorded by
-            -- an earlier version are still recognised as synced. Dropping it
-            -- would silently force a full re-download of every page.
-            local sync_key = page.id .. ":epub"
-
-            -- Check file existence in this database's directory
-            local file_exists = self.storage:fileExists(title, extension, database.name)
-
-            -- Update progress message
-            UIManager:close(progress_message)
-            progress_message = InfoMessage:new {
-              text = T(
-                _ "DB %1/%2: %3 - %4/%5: %6",
-                db_index,
-                total_databases,
-                database.name:sub(1, 15),
-                page_index,
-                page_count,
-                title:sub(1, 20)
-              ),
-            }
-            UIManager:show(progress_message)
-            UIManager:forceRePaint()
-
-            -- Sync if: not already recorded as synced OR the file is missing
-            local should_sync = not synced_ids[sync_key] or not file_exists
-
-            if should_sync then
-              -- Fetches nested children too, which is what makes table rows,
-              -- sub-bullets and toggle bodies available at all.
-              local blocks, tree_meta = NotionBlockTree.fetchPage(self.api, page.id, {
-                max_depth = self.max_depth,
-                request_budget = self.request_budget,
-              })
-
-              if not blocks then
-                -- A failed root fetch means the page's entire content is
-                -- unavailable. Writing a title-only EPUB and recording it as
-                -- synced would freeze that emptiness in place permanently, so
-                -- this counts as a failure and will be retried next sync.
-                logger.warn("NotionSync: Failed to get blocks for page", page.id,
-                  tostring(tree_meta.fatal))
-                total_failed = total_failed + 1
-                failed_titles[#failed_titles + 1] = title
-              else
-                if tree_meta.truncated then total_truncated = total_truncated + 1 end
-                if #tree_meta.errors > 0 then
-                  total_partial = total_partial + 1
-                end
-                local build_ok, build_err, build_info = NotionEpub:build {
-                  title = title,
-                  author = database.name,
-                  date = page.last_edited_time,
-                  page_id = page.id,
-                  source = page.url,
-                  output_path = self.storage:getOutputPath(title, database.name),
-                  image_urls = NotionXhtml.collectImageURLs(blocks),
-                  fetch_image = function(url) return image_manager:fetch(url) end,
-                  render = function(image_map)
-                    local doc, render_ctx = NotionXhtml.renderPage {
-                      title = title,
-                      blocks = blocks,
-                      image_map = image_map,
-                    }
-                    -- The generated markup is otherwise sealed inside the EPUB,
-                    -- which makes a rendering complaint impossible to diagnose
-                    -- without unzipping a book off the device.
-                    if opts.dump_xhtml then
-                      self:writeDebugFile("notionsync-debug.xhtml", doc)
-                      self:writeDebugFile("notionsync-debug-blocks.txt",
-                        self:describeBlocks(blocks, image_map))
-                    end
-                    return doc, render_ctx
-                  end,
-                }
-
-                if build_info and build_info.render_ctx then
-                  for btype, count in pairs(build_info.render_ctx.unsupported or {}) do
-                    unsupported[btype] = (unsupported[btype] or 0) + count
-                  end
-                end
-
-                if build_ok then
-                  -- Only recorded after the archive was written AND verified.
-                  self.storage:markAsSynced(sync_key)
-                  synced_ids[sync_key] = true
-                  total_new = total_new + 1
-                else
-                  logger.warn(string.format("NotionSync: build failed for '%s': %s",
-                    title, tostring(build_err)))
-                  total_failed = total_failed + 1
-                  failed_titles[#failed_titles + 1] = title
-                end
-              end
-            else
-              total_old = total_old + 1
-            end
-
-            -- Schedule next page
-            UIManager:nextTick(function() processPage(page_index + 1) end)
-          end
-
-          -- Start processing pages in this database
-          processPage(1)
-        end
-
-        -- Start processing from first database
-        processDatabase(1)
-      end)
-
-      if not ok then
-        logger.err("NotionSync: Sync error:", err)
-        UIManager:close(progress_message)
-        UIManager:show(InfoMessage:new {
-          text = T(_ "Sync error: %1", tostring(err)),
-          timeout = 5,
-        })
-      end
+      Trapper:wrap(function() self:runSync(opts) end)
     end)
   end)
+end
+
+-- Plain nested loops.
+--
+-- This replaces a chain of mutually recursive UIManager:nextTick continuations.
+-- Besides being hard to follow, that structure caused a real bug: the pcall
+-- wrapped only the first page, because every later page ran in a fresh closure
+-- outside it. Here the pcall sits INSIDE the page loop, so a page that throws
+-- costs one page -- and there are no escaping closures for the problem to return
+-- through.
+function NotionSync:runSync(opts)
+  local stats = {
+    new = 0,
+    unchanged = 0,
+    failed = 0,
+    truncated = 0,
+    partial = 0,
+    failed_titles = {},
+    unsupported = {},
+    cancelled = false,
+  }
+
+  local image_manager = ImageManager:new()
+  self.sync_running = true
+
+  -- Teardown must happen even if the loop throws. The per-page pcall covers page
+  -- errors, but anything outside it -- a failed query, a formatting slip -- would
+  -- otherwise escape to Trapper:wrap, which logs the error and returns WITHOUT
+  -- clearing its widget. The result would be a progress message stuck on screen
+  -- forever, no report, and a sync_running flag that blocks every later sync.
+  local ok, err = pcall(function()
+    self:runSyncLoop(opts, stats, image_manager)
+  end)
+
+  self.sync_running = false
+  Trapper:reset()
+
+  if not ok then
+    logger.err("NotionSync: sync aborted by error:", tostring(err))
+    stats.failed = stats.failed + 1
+    stats.fatal = tostring(err)
+  end
+
+  self:showSyncReport(stats, image_manager)
+end
+
+function NotionSync:runSyncLoop(opts, stats, image_manager)
+  self.api:resetRetryBudget()
+  local synced_ids = self.storage:getSyncedIds()
+
+  self.sync_alive = true
+  self.last_tick = nil
+
+  local db_count = #self.selected_databases
+  if opts.max_databases and opts.max_databases < db_count then
+    db_count = opts.max_databases
+  end
+
+  self:tick(self:progressText(0, db_count, 0, 0, "", _ "Starting..."), true)
+
+  for db_index = 1, db_count do
+    local database = self.selected_databases[db_index]
+
+    if not self:tick(self:progressText(db_index, db_count, 0, 0,
+      database.name, _ "Querying database..."), true) then
+      stats.cancelled = true
+      break
+    end
+
+    local ok_query, result = self.api:queryDatabase(database.id, 20)
+    if not ok_query then
+      -- A whole database dropping out is counted, not merely logged.
+      logger.warn("NotionSync: query failed for", database.name, tostring(result))
+      stats.failed = stats.failed + 1
+      stats.failed_titles[#stats.failed_titles + 1] = database.name
+    else
+      local pages = result.results or {}
+      local page_count = #pages
+      if opts.max_pages and opts.max_pages < page_count then
+        page_count = opts.max_pages
+      end
+
+      for page_index = 1, page_count do
+        local page = pages[page_index]
+        local title = self.api:getPageTitle(page)
+
+        if not self:tick(self:progressText(db_index, db_count,
+          page_index, page_count, title, ""), false) then
+          stats.cancelled = true
+          break
+        end
+
+        local ok_page, err = pcall(function()
+          self:syncOnePage {
+            page = page,
+            title = title,
+            database = database,
+            synced_ids = synced_ids,
+            image_manager = image_manager,
+            stats = stats,
+            opts = opts,
+            db_index = db_index,
+            db_count = db_count,
+            page_index = page_index,
+            page_count = page_count,
+          }
+        end)
+
+        if not ok_page then
+          logger.err("NotionSync: error syncing", title, err)
+          stats.failed = stats.failed + 1
+          stats.failed_titles[#stats.failed_titles + 1] = title
+        end
+      end
+    end
+
+    if stats.cancelled then break end
+  end
+end
+
+function NotionSync:syncOnePage(ctx)
+  local page, title = ctx.page, ctx.title
+  local database, stats = ctx.database, ctx.stats
+
+  -- The ":epub" suffix is retained so pages recorded by an earlier version are
+  -- still recognised. Dropping it would silently force a full re-download.
+  local sync_key = page.id .. ":epub"
+  local file_exists = self.storage:fileExists(title, ".epub", database.name)
+
+  if ctx.synced_ids[sync_key] and file_exists then
+    stats.unchanged = stats.unchanged + 1
+    return
+  end
+
+  local function detail(text)
+    return self:progressText(ctx.db_index, ctx.db_count,
+      ctx.page_index, ctx.page_count, title, text)
+  end
+
+  -- Cancellation is checked inside the fetch too: a single page can make dozens
+  -- of requests and would otherwise be uninterruptible for its whole duration.
+  local blocks, tree_meta = NotionBlockTree.fetchPage(self.api, page.id, {
+    max_depth = self.max_depth,
+    request_budget = self.request_budget,
+    should_abort = function() return not self.sync_alive end,
+    progress = function(requests)
+      self:tick(detail(T(_ "Fetching blocks (%1)", requests)), false)
+    end,
+  })
+
+  if not blocks then
+    -- A failed root fetch means the page's content is unavailable. Writing a
+    -- title-only EPUB and recording it as synced would freeze that emptiness in
+    -- place permanently, so this is a failure and will be retried next sync.
+    logger.warn("NotionSync: no blocks for", page.id, tostring(tree_meta.fatal))
+    stats.failed = stats.failed + 1
+    stats.failed_titles[#stats.failed_titles + 1] = title
+    return
+  end
+
+  if tree_meta.aborted then
+    stats.cancelled = true
+    return
+  end
+  if tree_meta.truncated then stats.truncated = stats.truncated + 1 end
+  if #tree_meta.errors > 0 then stats.partial = stats.partial + 1 end
+
+  local image_urls = NotionXhtml.collectImageURLs(blocks)
+  local image_index = 0
+
+  local build_ok, build_err, build_info = NotionEpub:build {
+    title = title,
+    author = database.name,
+    date = page.last_edited_time,
+    page_id = page.id,
+    source = page.url,
+    output_path = self.storage:getOutputPath(title, database.name),
+    image_urls = image_urls,
+    fetch_image = function(url) return ctx.image_manager:fetch(url) end,
+    on_progress = function()
+      image_index = image_index + 1
+      return self:tick(detail(T(_ "Image %1/%2", image_index, #image_urls)), false)
+    end,
+    render = function(image_map)
+      local doc, render_ctx = NotionXhtml.renderPage {
+        title = title,
+        blocks = blocks,
+        image_map = image_map,
+      }
+      if ctx.opts.dump_xhtml then
+        self:writeDebugFile("notionsync-debug.xhtml", doc)
+        self:writeDebugFile("notionsync-debug-blocks.txt",
+          self:describeBlocks(blocks, image_map))
+      end
+      return doc, render_ctx
+    end,
+  }
+
+  if build_info and build_info.render_ctx then
+    for btype, count in pairs(build_info.render_ctx.unsupported or {}) do
+      stats.unsupported[btype] = (stats.unsupported[btype] or 0) + count
+    end
+  end
+
+  if build_ok then
+    -- Recorded only after the archive was written AND verified.
+    self.storage:markAsSynced(sync_key)
+    ctx.synced_ids[sync_key] = true
+    stats.new = stats.new + 1
+  elseif build_err == "cancelled" then
+    stats.cancelled = true
+  else
+    logger.warn("NotionSync: build failed for", title, tostring(build_err))
+    stats.failed = stats.failed + 1
+    stats.failed_titles[#stats.failed_titles + 1] = title
+  end
+end
+
+function NotionSync:showSyncReport(stats, image_manager)
+  local lines = {}
+
+  -- The headline must reflect reality: reporting "complete" while pages failed is
+  -- how content loss went unnoticed before.
+  if stats.cancelled then
+    lines[#lines + 1] = _ "Sync cancelled"
+  elseif stats.failed > 0 then
+    lines[#lines + 1] = T(_ "Sync finished with %1 problem(s)", stats.failed)
+  else
+    lines[#lines + 1] = _ "Sync complete!"
+  end
+
+  lines[#lines + 1] = T(_ "New: %1   Unchanged: %2", stats.new, stats.unchanged)
+
+  -- An error that escaped the per-page guard aborted the run; say so rather than
+  -- letting the counts imply the sync simply finished early.
+  if stats.fatal then
+    lines[#lines + 1] = T(_ "Stopped by an error: %1", stats.fatal)
+  end
+
+  if stats.failed > 0 then
+    local names = {}
+    for i = 1, math.min(3, #stats.failed_titles) do
+      names[#names + 1] = stats.failed_titles[i]
+    end
+    local suffix = #stats.failed_titles > 3
+      and T(_ ", +%1 more", #stats.failed_titles - 3) or ""
+    lines[#lines + 1] = T(_ "Failed: %1%2", table.concat(names, ", "), suffix)
+  end
+
+  local img = image_manager:getStats()
+  if img.downloaded > 0 or img.failed > 0 or img.skipped_too_large > 0 then
+    lines[#lines + 1] = T(_ "Images: %1 embedded, %2 failed", img.downloaded, img.failed)
+    if img.skipped_too_large > 0 then
+      lines[#lines + 1] = T(_ "%1 image(s) too large, skipped", img.skipped_too_large)
+    end
+  end
+
+  -- Content that exists in Notion but was not retrieved must be reported: the
+  -- page would otherwise look complete.
+  if stats.truncated > 0 then
+    lines[#lines + 1] = T(_ "%1 page(s) hit the request limit", stats.truncated)
+  end
+  if stats.partial > 0 then
+    lines[#lines + 1] = T(_ "%1 page(s) had nested content unavailable", stats.partial)
+  end
+
+  local unsupported = {}
+  for btype, count in pairs(stats.unsupported) do
+    unsupported[#unsupported + 1] = string.format("%s (%d)", btype, count)
+  end
+  if #unsupported > 0 then
+    table.sort(unsupported)
+    lines[#lines + 1] = _ "Unsupported blocks: " .. table.concat(unsupported, ", ")
+  end
+
+  -- Bad news must not disappear before it can be read.
+  --
+  -- Written as a statement, NOT as `cond and nil or 5`: that idiom always yields
+  -- 5, because `and nil` is falsy and falls through to the `or`. This shipped
+  -- broken twice, so the timeout now has a test.
+  local timeout = 5
+  if stats.failed > 0 or stats.cancelled then
+    timeout = nil
+  end
+
+  UIManager:show(InfoMessage:new {
+    text = table.concat(lines, "\n"),
+    timeout = timeout,
+  })
 end
 
 return NotionSync

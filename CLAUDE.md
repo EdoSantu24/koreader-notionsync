@@ -66,9 +66,15 @@ Images never carry a remote URL into the document — `src` is always a local `i
 
 Peak memory is one image, not a page's worth: each is fetched, written, and dropped before the next. There is deliberately no temp directory — the previous staging directory was archived wholesale per page, so every EPUB ended up containing every image downloaded so far in the sync.
 
-### Non-blocking sync loop
+### Sync loop
 
-`syncNow` must never block KOReader's event loop. Database and page iteration are written as mutually recursive continuations (`processDatabase` → `processPage`) that re-schedule themselves through `UIManager:nextTick`, closing and re-showing the `InfoMessage` each step to render progress. Do not rewrite these as `for` loops — the UI would freeze for the whole sync and progress would never paint. The whole body is wrapped in `pcall` so a mid-sync error surfaces as a dialog rather than killing KOReader.
+`syncNow` hands off to `Trapper:wrap`, and `runSync` is then **plain nested `for` loops**. This replaced a chain of mutually recursive `UIManager:nextTick` continuations, which was not just hard to follow: it caused a real bug, because the `pcall` wrapped only the first page while every later page ran in a fresh closure outside it. The `pcall` now sits inside the page loop, so a page that throws costs one page.
+
+`Trapper:wrap` must be the **last** thing in its handler — it returns as soon as the coroutine first yields, so anything after it would run mid-sync.
+
+All progress and cancellation goes through `NotionSync:tick(text, force)`. It is throttled by *time* (~1s), so an unchanged page causes no repaint while a slow page still shows movement; cancellation latency is therefore bounded by the throttle interval plus the in-flight network timeout. Cancellation is checked between databases, between pages, inside `blocktree` (via `should_abort`, because one page can make dozens of requests) and before each image download.
+
+**Progress text must keep a fixed shape.** `Trapper:info(text, fast_refresh)` with `fast_refresh` repaints only the *new* widget's rectangle, so a message that shrinks leaves ghost pixels on e-ink. `progressText` therefore always emits three lines with a padded, fixed-width title, and there is a test asserting the line count. Forced ticks (database boundaries) use a full refresh because the layout can change shape.
 
 ### Sync history
 
@@ -148,7 +154,7 @@ punctuation collide the same way.
 **Only the first rich-text segment of a title is read.** `api.lua:getPageTitle`
 takes `title[1].plain_text`, so `Chapter **One**` truncates to `"Chapter "`.
 
-**The `pcall` in `syncNow` covers only the first page.** Every later page runs in
-a fresh `UIManager:nextTick` closure outside it, so a mid-sync error escapes
-unprotected. There is also no way to cancel a running sync, and each page forces
-a blocking full-screen e-ink repaint.
+**Lua trap worth knowing.** `cond and nil or 5` always evaluates to `5`, because
+`and nil` is falsy and falls through to the `or`. This shipped twice in the sync
+report's dialog timeout, silently defeating the sticky-on-failure behaviour. Write
+it as a statement.
