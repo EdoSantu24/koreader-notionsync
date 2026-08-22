@@ -48,7 +48,12 @@ function ImageManager:cleanupOldFiles(temp_dir)
     end
 end
 
-function ImageManager:downloadImage(url, page_id, image_index)
+-- TODO(images): page_id and image_index are accepted but ignored, which is why
+-- every image lands in one shared directory keyed only by a session-wide counter
+-- -- and therefore why every generated EPUB ends up containing every image
+-- downloaded so far in the sync. Scoping images per page is what these two
+-- arguments are for. Remove this suppression when that lands.
+function ImageManager:downloadImage(url, page_id, image_index) -- luacheck: ignore page_id image_index
     -- Check cache first
     if self.image_cache[url] then
         logger.dbg("ImageManager: Using cached image for", url)
@@ -115,7 +120,11 @@ function ImageManager:downloadFile(url, filepath)
         sink = ltn12.sink.file(file),
     }
 
-    local code, headers, status = socket.skip(1, http.request(request))
+    -- The response headers are deliberately dropped for now. They carry
+    -- Content-Type, which is the correct source for the image's media-type --
+    -- currently guessed from the URL instead, which fails on Notion's
+    -- pre-signed URLs. See TODO(images) above.
+    local code, _, status = socket.skip(1, http.request(request))
 
     -- Reset timeout
     socketutil:reset_timeout()

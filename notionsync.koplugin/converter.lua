@@ -153,7 +153,7 @@ function NotionConverter:pageToMarkdown(page, blocks)
 
     -- Get title from page properties
     if page and page.properties then
-        for prop_name, prop_value in pairs(page.properties) do
+        for _, prop_value in pairs(page.properties) do
             if prop_value.type == "title" and prop_value.title and #prop_value.title > 0 then
                 title = prop_value.title[1].plain_text or title
                 break

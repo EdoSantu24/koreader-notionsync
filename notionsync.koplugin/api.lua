@@ -45,7 +45,7 @@ function NotionAPI:apiCall(method, endpoint, body)
 
     socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
 
-    local code, resp_headers, status = socket.skip(1, https.request(request))
+    local code = socket.skip(1, https.request(request))
 
     socketutil:reset_timeout()
 
@@ -108,7 +108,7 @@ function NotionAPI:getPageTitle(page)
     local title = "Untitled"
 
     if page.properties then
-        for prop_name, prop_value in pairs(page.properties) do
+        for _, prop_value in pairs(page.properties) do
             if prop_value.type == "title" and prop_value.title and #prop_value.title > 0 then
                 title = prop_value.title[1].plain_text or title
                 break
