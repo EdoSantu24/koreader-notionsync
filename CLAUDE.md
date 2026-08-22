@@ -78,8 +78,14 @@ All progress and cancellation goes through `NotionSync:tick(text, force)`. It is
 
 ### Pagination
 
-`api.collectAll(fetch, max_items)` walks every cursor page and is used for
-databases, pages and block children alike.
+`api.collectAll(fetch, max_items)` walks every cursor page, and is used for the
+database list and for a database's pages.
+
+`blocktree.lua` deliberately has its **own** cursor loop rather than calling it:
+child fetching counts every request against a shared per-page budget and has to be
+able to abort mid-walk, neither of which `collectAll` models. The duplication is
+small and intentional — but both copies need the same cursor guard, so if you
+change one, check the other.
 
 Two rules in it are load-bearing. The cursor check is `type(cursor) == "string"`,
 **not** a truthiness test: KOReader's `rapidjson` decodes JSON `null` to a

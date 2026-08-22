@@ -93,7 +93,10 @@ function NotionAPI:apiCall(method, endpoint, body)
     if ok and error_json and error_json.message then
         error_msg = error_json.message
     end
-    return false, error_msg
+    -- The code is returned as a third value so callers can distinguish a
+    -- malformed request from an auth or server problem. Existing two-value call
+    -- sites are unaffected.
+    return false, error_msg, code
 end
 
 -- One HTTP attempt. Returns code, sink_table.
@@ -178,8 +181,8 @@ end
 
 -- Walks every cursor page of a paginated endpoint.
 --
--- fetch(cursor) -> ok, result
--- Returns ok, items, truncated  (or false, error_message)
+-- fetch(cursor) -> ok, result, code
+-- Returns ok, items, truncated  (or false, error_message, nil, code)
 --
 -- The cursor guard is `type(cursor) == "string"`, not a truthiness test, and that
 -- is the whole reason this is a shared function: KOReader's rapidjson decodes JSON
@@ -199,8 +202,8 @@ function NotionAPI.collectAll(fetch, max_items)
         end
         requests = requests + 1
 
-        local ok, res = fetch(cursor)
-        if not ok then return false, res end
+        local ok, res, code = fetch(cursor)
+        if not ok then return false, res, nil, code end
 
         for _, item in ipairs(res.results or {}) do
             out[#out + 1] = item
@@ -233,18 +236,23 @@ end
 
 -- max_items of nil or 0 means "no limit beyond the request backstop".
 function NotionAPI:getAllPages(database_id, max_items)
-    local ok, items, truncated = NotionAPI.collectAll(function(cursor)
+    local ok, items, truncated, code = NotionAPI.collectAll(function(cursor)
         return self:queryDatabase(database_id, cursor)
     end, max_items)
 
     if ok then return ok, items, truncated end
 
-    -- The sort key above is an assumption about the API, and a rejected sort would
-    -- otherwise cost the entire database. Retrying without it makes that
-    -- assumption non-fatal at the price of one extra request on failure; if the
-    -- retry also fails, the original error is what gets reported.
+    -- The sort key is an assumption about the API, and a rejected sort would
+    -- otherwise cost the entire database -- so it is retried without one.
+    --
+    -- Only for a 400 though. Retrying an auth or server error would double the
+    -- request count for no possible benefit, and it compounds: apiCall already
+    -- makes up to three attempts with backoff for retryable codes, so a blanket
+    -- retry here could mean six requests and twice the sleep budget per database.
+    if code ~= 400 then return false, items end
+
     local first_error = items
-    logger.warn("NotionAPI: query failed, retrying without sorts:", tostring(first_error))
+    logger.warn("NotionAPI: request rejected, retrying without sorts:", tostring(first_error))
 
     local retry_ok, retry_items, retry_truncated = NotionAPI.collectAll(function(cursor)
         return self:queryDatabase(database_id, cursor, { no_sort = true })

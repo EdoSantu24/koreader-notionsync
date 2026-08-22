@@ -274,13 +274,14 @@ end)
 
 describe("getAllPages_sort_fallback", function()
     -- The sort key is an assumption about the API. A rejected sort must not cost
-    -- the entire database.
-    it("retries_without_sorts_when_the_query_fails", function()
+    -- the entire database. Notion answers a malformed body with 400, and the
+    -- fixture returns that code because the retry is now conditional on it.
+    it("retries_without_sorts_on_a_400", function()
         local api = API:new("token")
         local bodies = {}
         api.apiCall = function(_, _, _, body)
             bodies[#bodies + 1] = body
-            if body.sorts then return false, "sort is not valid" end
+            if body.sorts then return false, "sort is not valid", 400 end
             return true, { results = { { id = "p1" } }, has_more = false }
         end
 
@@ -291,12 +292,39 @@ describe("getAllPages_sort_fallback", function()
         assert_eq(bodies[2].sorts, nil, "retry omits the sort")
     end)
 
-    it("reports_the_original_error_when_the_retry_also_fails", function()
+    -- Retrying these cannot help, and it compounds: apiCall already makes up to
+    -- three attempts with backoff, so a blanket retry would mean six requests and
+    -- twice the sleep budget per database.
+    it("does_not_retry_an_auth_error", function()
         local api = API:new("token")
-        api.apiCall = function() return false, "unauthorized" end
+        local calls = 0
+        api.apiCall = function()
+            calls = calls + 1
+            return false, "API token is invalid", 401
+        end
         local ok, err = api:getAllPages("db")
         assert_false(ok)
-        assert_contains(err, "unauthorized")
+        assert_contains(err, "invalid")
+        assert_eq(calls, 1, "a 401 must not trigger the no-sort retry")
+    end)
+
+    it("does_not_retry_a_server_error", function()
+        local api = API:new("token")
+        local calls = 0
+        api.apiCall = function()
+            calls = calls + 1
+            return false, "internal error", 500
+        end
+        api:getAllPages("db")
+        assert_eq(calls, 1)
+    end)
+
+    it("reports_the_original_error_when_the_retry_also_fails", function()
+        local api = API:new("token")
+        api.apiCall = function() return false, "body is not valid", 400 end
+        local ok, err = api:getAllPages("db")
+        assert_false(ok)
+        assert_contains(err, "body is not valid")
     end)
 
     it("does_not_retry_when_the_first_attempt_succeeds", function()

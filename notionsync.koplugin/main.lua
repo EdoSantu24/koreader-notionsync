@@ -662,8 +662,12 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
     -- Follows every cursor page. Previously only the first 20 pages of a
     -- database existed as far as the plugin was concerned, with no indication
     -- that anything had been left behind.
+    -- opts.max_pages (the debug single-page sync) must also bound the FETCH, not
+    -- just trim afterwards: paging through 200 pages to then use one defeats the
+    -- point of a debug path that is supposed to take seconds.
+    local fetch_limit = opts.max_pages or self.max_pages_per_database
     local ok_query, pages, query_truncated =
-      self.api:getAllPages(database.id, self.max_pages_per_database)
+      self.api:getAllPages(database.id, fetch_limit)
 
     if not ok_query then
       -- A whole database dropping out is counted, not merely logged.
