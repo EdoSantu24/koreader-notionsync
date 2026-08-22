@@ -628,7 +628,9 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
       for page_index = 1, page_count do
         local page = pages[page_index]
         local title = titles[page_index]
+        -- Fallback covers a page with no id, which resolveFilenames cannot key.
         local filename = filenames[page.id]
+          or self.storage:sanitizeFilename(title, ".epub")
 
         if not self:tick(self:progressText(db_index, db_count,
           page_index, page_count, title, ""), false) then

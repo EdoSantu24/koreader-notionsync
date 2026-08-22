@@ -53,10 +53,45 @@ end
 -- Short, stable discriminator for a page. Derived from the Notion id so the same
 -- collision always resolves to the same filename, unlike a counter, which would
 -- depend on processing order and rename files between runs.
-local function id_suffix(page_id)
+local function id_suffix(page_id, length)
     local hex = tostring(page_id or ""):lower():gsub("[^0-9a-f]", "")
     if hex == "" then return "0" end
-    return hex:sub(1, 8)
+    return hex:sub(1, length or 8)
+end
+
+-- Suffix length just long enough to tell every page in a colliding group apart.
+--
+-- Eight hex digits is 32 bits and almost always enough, but "almost always" is
+-- not a guarantee -- and two pages sharing a suffix would silently reintroduce
+-- the overwrite this whole mechanism exists to prevent. So it is verified rather
+-- than assumed, growing the discriminator until the group is distinguishable.
+local function unique_suffixes(group)
+    for length = 8, 32, 8 do
+        local seen, unique = {}, true
+        for _, entry in ipairs(group) do
+            local suffix = id_suffix(entry.id, length)
+            if seen[suffix] then
+                unique = false
+                break
+            end
+            seen[suffix] = true
+        end
+        if unique then
+            local out = {}
+            for _, entry in ipairs(group) do
+                out[entry.id] = id_suffix(entry.id, length)
+            end
+            return out, length
+        end
+    end
+    -- Two pages with identical ids should be impossible; if it happens, fall back
+    -- to the index so the names are at least distinct.
+    logger.warn("NotionStorage: page ids are not distinguishable, using positions")
+    local out = {}
+    for index, entry in ipairs(group) do
+        out[entry.id] = tostring(index)
+    end
+    return out, 8
 end
 
 function NotionStorage:new(sync_dir)
@@ -169,10 +204,11 @@ function NotionStorage:ensureDatabaseDirectory(database_name)
     return db_dir
 end
 
+-- Single-name convenience. Prefer resolveFilenames when a whole database is in
+-- view, because only that can see -- and resolve -- a collision between two pages.
 function NotionStorage:sanitizeFilename(title, extension)
-    -- EPUB is the only output format. A ".md" default used to live here, which
-    -- no caller reaches any more but would silently produce a filename that
-    -- fileExists() could never match against what saveEpub() actually writes.
+    -- EPUB is the only output format, so an omitted extension must not produce a
+    -- name that outputExists() could never match against what the builder writes.
     extension = extension or ".epub"
     return self:sanitizeName(title, "untitled") .. extension
 end
@@ -196,10 +232,16 @@ function NotionStorage:resolveFilenames(entries, extension)
 
     local by_stem = {}
     for _, entry in ipairs(entries or {}) do
-        local stem = self:sanitizeName(entry.title, "untitled")
-        by_stem[stem] = by_stem[stem] or {}
-        local group = by_stem[stem]
-        group[#group + 1] = entry
+        -- An entry with no id cannot be keyed in the result, and indexing a table
+        -- with nil would abort the whole sync.
+        if type(entry) ~= "table" or entry.id == nil then
+            logger.warn("NotionStorage: skipping filename for an entry with no id")
+        else
+            local stem = self:sanitizeName(entry.title, "untitled")
+            by_stem[stem] = by_stem[stem] or {}
+            local group = by_stem[stem]
+            group[#group + 1] = entry
+        end
     end
 
     local names = {}
@@ -207,13 +249,14 @@ function NotionStorage:resolveFilenames(entries, extension)
         if #group == 1 then
             names[group[1].id] = stem .. extension
         else
+            local suffixes, length = unique_suffixes(group)
             logger.info("NotionStorage:", #group, "pages share the name", stem,
-                "-- adding id suffixes")
+                "-- adding", length, "char id suffixes")
             for _, entry in ipairs(group) do
                 -- Re-truncate: the suffix must not push the name over the budget.
-                local base = truncate_utf8(stem, MAX_NAME_BYTES - 9)
+                local base = truncate_utf8(stem, MAX_NAME_BYTES - (length + 1))
                 base = base:gsub("[_%.%s]+$", "")
-                names[entry.id] = base .. "_" .. id_suffix(entry.id) .. extension
+                names[entry.id] = base .. "_" .. suffixes[entry.id] .. extension
             end
         end
     end

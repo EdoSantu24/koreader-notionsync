@@ -169,6 +169,38 @@ describe("resolveFilenames", function()
     it("handles_an_empty_list", function()
         assert_eq(next(S:resolveFilenames({}, ".epub")), nil)
     end)
+
+    -- Eight hex digits is almost always enough to tell pages apart, but "almost"
+    -- would silently reintroduce the overwrite this function exists to prevent.
+    it("extends_the_suffix_when_ids_share_a_prefix", function()
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111bbbb", title = "Same" },
+            { id = "aaaaaaaa2222cccc", title = "Same" },
+        }, ".epub")
+        assert_true(names["aaaaaaaa1111bbbb"] ~= names["aaaaaaaa2222cccc"],
+            "pages sharing the first 8 hex digits must still get distinct names")
+    end)
+
+    it("stays_within_budget_even_with_an_extended_suffix", function()
+        local long = string.rep("y", 200)
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111bbbb", title = long },
+            { id = "aaaaaaaa2222cccc", title = long },
+        }, ".epub")
+        for _, name in pairs(names) do
+            assert_true(#name <= 95, "name too long: " .. #name)
+        end
+    end)
+
+    it("skips_entries_with_no_id_instead_of_erroring", function()
+        h.logger.reset()
+        local names = S:resolveFilenames({
+            { id = "aaaaaaaa1111", title = "Good" },
+            { title = "No id at all" },
+        }, ".epub")
+        assert_eq(names["aaaaaaaa1111"], "Good.epub")
+        assert_true(h.logger.logged("warn", "no id"))
+    end)
 end)
 
 describe("sanitizeDatabaseName", function()
