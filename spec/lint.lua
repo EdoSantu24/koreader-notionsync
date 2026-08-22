@@ -53,6 +53,7 @@ local FILES = {
     "spec/helper.lua",
     "spec/syntax_spec.lua",
     "spec/converter_spec.lua",
+    "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",
 }

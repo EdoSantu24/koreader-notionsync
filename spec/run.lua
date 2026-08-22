@@ -23,6 +23,7 @@ local current_group = ""
 local SPEC_FILES = {
     "spec/syntax_spec.lua",
     "spec/converter_spec.lua",
+    "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",
 }
