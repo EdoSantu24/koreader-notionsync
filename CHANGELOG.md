@@ -17,10 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually checked
 - `CLAUDE.md` with architecture notes and platform gotchas
 
+- `deploy-mtp.ps1`, a PowerShell deployment script for MTP devices. Newer Kindles
+  (Colorsoft, Scribe, recent Paperwhites) expose storage over MTP and never get a
+  drive letter, so `deploy.sh` cannot reach them at all. Verifies every copied
+  file's size, supports `-Backup` and `-WhatIf`
+
 ### Changed
 
 - `deploy.sh` now supports Kindle as well as Kobo, detecting whether KOReader
-  lives at `<mount>/koreader` or `<mount>/.adds/koreader`
+  lives at `<mount>/koreader` or `<mount>/.adds/koreader`, and points at
+  `deploy-mtp.ps1` when no drive letter is available
 - `deploy.sh` environment variable renamed to `DEVICE_MOUNT_PATH`
   (`KOBO_MOUNT_PATH` still accepted)
 - Linting now runs against LuaJIT (`std = "luajit"`) instead of the permissive

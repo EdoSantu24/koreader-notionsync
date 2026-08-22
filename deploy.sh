@@ -59,6 +59,12 @@ EOF
     echo -e "${DIM}  Kobo,   macOS:   /Volumes/KOBOeReader${RESET}"
     echo -e "${DIM}  Windows (WSL):   /mnt/d/${RESET}"
     echo ""
+    echo -e "${YELLOW}${ICON_WARN}No drive letter for your device?${RESET}"
+    echo -e "${DIM}  Newer Kindles (Colorsoft, Scribe, recent Paperwhites) use MTP and${RESET}"
+    echo -e "${DIM}  never get a drive letter -- they appear only as${RESET}"
+    echo -e "${DIM}  \"This PC\\<device>\\Internal Storage\". This script cannot reach them.${RESET}"
+    echo -e "${DIM}  On Windows, use:  powershell -File ./deploy-mtp.ps1 -Backup${RESET}"
+    echo ""
     exit 1
 fi
 cat << "EOF"

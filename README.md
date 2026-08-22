@@ -72,7 +72,30 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 **Note:** The deployment script is for development only. End users should install from releases. I have also only tested on kobo
 but this should work on other devices.
 
-#### 1. Set Up Environment Variable
+#### 0. Which deployment script do I need?
+
+It depends on how your device presents itself over USB:
+
+| Your device shows up as | Use |
+| --- | --- |
+| A drive letter / mounted volume (`D:`, `/Volumes/Kindle`, `/media/...`) | `./deploy.sh` |
+| `This PC\<device>\Internal Storage` with **no** drive letter | `./deploy-mtp.ps1` (Windows) |
+
+**Newer Kindles — Colorsoft, Scribe, recent Paperwhites — use MTP** and never get
+a drive letter. `deploy.sh` cannot reach them at all, because it copies with `cp`
+to a filesystem path and MTP does not provide one. Use the PowerShell script:
+
+```powershell
+# From the repository root, in PowerShell:
+.\deploy-mtp.ps1 -Backup          # -Backup saves the installed copy first
+.\deploy-mtp.ps1 -WhatIf          # dry run, touches nothing
+```
+
+It finds the device, verifies every copied file's byte size, and tells you if a
+copy silently failed (which MTP does if the device falls asleep mid-transfer).
+Older mass-storage Kindles and all Kobos can use `deploy.sh` below.
+
+#### 1. Set Up Environment Variable (`deploy.sh` only)
 
 The deployment script requires you to set the path to your mounted device. It
 detects whether KOReader is installed in the Kobo layout (`<mount>/.adds/koreader`)
