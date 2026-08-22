@@ -15,6 +15,12 @@
     Use deploy.sh for older mass-storage devices (which do get a drive letter),
     and this script for MTP devices.
 
+    Files are overwritten in place. An earlier version deleted each file first,
+    which made the script hang: InvokeVerb('delete') raises a shell confirmation
+    dialog that a non-interactive PowerShell session cannot dismiss. Overwriting
+    works fine over MTP -- do not reintroduce a delete step. Nothing in this
+    script may call InvokeVerb.
+
 .PARAMETER DeviceName
     Wildcard matched against the portable device name. Defaults to 'Kindle*'.
 
@@ -89,6 +95,23 @@ function Wait-ForFile($folderItem, [string]$name, [int64]$expectedSize, [int]$ti
         if ($found) {
             $size = $found.ExtendedProperty('Size')
             if (-not $expectedSize -or $size -eq $expectedSize) { return $true }
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    return $false
+}
+
+# Used when the new file is the same length as the old one, so a size check
+# cannot tell whether the overwrite actually happened.
+function Wait-ForModified($folderItem, [string]$name, $previousDate, [int]$timeoutSec = 20) {
+    if (-not $previousDate) { return $true }
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
+    while ((Get-Date) -lt $deadline) {
+        $found = Get-ShellChild $folderItem $name
+        if (-not $found) { $found = Get-ShellChild $folderItem $stem }
+        if ($found -and $found.ExtendedProperty('System.DateModified') -ne $previousDate) {
+            return $true
         }
         Start-Sleep -Milliseconds 400
     }
@@ -213,31 +236,58 @@ $failed = @()
 foreach ($file in $sourceFiles) {
     if (-not $PSCmdlet.ShouldProcess($file.Name, 'Copy to device')) { continue }
 
-    # MTP will not overwrite in place, so remove the old file first. The plugin
-    # is fully replaced on every deploy, so a stale leftover is worse than a gap.
+    # Copy straight over the existing file.
+    #
+    # This used to delete the old file first, on the assumption that MTP cannot
+    # overwrite in place. That assumption was wrong, and the delete was actively
+    # harmful: InvokeVerb('delete') raises a shell confirmation dialog that a
+    # non-interactive PowerShell session cannot answer, so the script would hang.
+    # Overwriting with the flags below is silent and reliable -- do not reintroduce
+    # a delete step here.
+    $existingSize = $null
+    $existingDate = $null
     $old = Get-ShellChild $existing $file.Name
-    if (-not $old) {
-        $old = Get-ShellChild $existing $file.BaseName
-    }
+    if (-not $old) { $old = Get-ShellChild $existing $file.BaseName }
     if ($old) {
-        try { $old.InvokeVerb('delete') } catch { }
-        $gone = (Get-Date).AddSeconds(10)
-        while ((Get-Date) -lt $gone) {
-            if (-not (Get-ShellChild $existing $file.Name) -and
-                -not (Get-ShellChild $existing $file.BaseName)) { break }
-            Start-Sleep -Milliseconds 300
-        }
+        $existingSize = $old.ExtendedProperty('Size')
+        $existingDate = $old.ExtendedProperty('System.DateModified')
     }
 
     $targetFolder.CopyHere($file.FullName, $COPY_FLAGS)
 
-    if (Wait-ForFile $existing $file.Name $file.Length) {
+    # A size match normally proves the copy landed, because a changed file has a
+    # different length. When the length happens to be identical, fall back to
+    # waiting for the modification time to advance.
+    $confirmed = Wait-ForFile $existing $file.Name $file.Length
+    if ($confirmed -and $existingSize -eq $file.Length) {
+        $confirmed = Wait-ForModified $existing $file.Name $existingDate
+    }
+
+    if ($confirmed) {
         Write-Step "$($file.Name)  ($($file.Length) bytes)"
         $copied++
     } else {
         Write-Fail "$($file.Name) -- copy not confirmed"
         $failed += $file.Name
     }
+}
+
+# Files on the device that no longer exist in the source tree. These are NOT
+# removed automatically: deleting over MTP needs InvokeVerb('delete'), which is
+# what used to hang this script. They are inert (main.lua only loads the modules
+# it names), so reporting them is enough.
+$sourceNames = @{}
+foreach ($f in $sourceFiles) { $sourceNames[$f.BaseName] = $true }
+$stale = @()
+foreach ($item in $existing.GetFolder.Items()) {
+    if (-not $item.IsFolder -and -not $sourceNames[[System.IO.Path]::GetFileNameWithoutExtension($item.Name)]) {
+        $stale += $item.Name
+    }
+}
+if ($stale.Count -gt 0) {
+    Write-Host ""
+    Write-Warn2 "Stale file(s) left over from an older version: $($stale -join ', ')"
+    Write-Warn2 "They are unused and harmless. Delete them in File Explorer if you want."
 }
 
 Write-Host ""
