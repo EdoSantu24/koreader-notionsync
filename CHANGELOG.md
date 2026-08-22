@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A running sync can now be cancelled.** Tap the progress message and confirm;
+  the sync stops at the next checkpoint without leaving a partial file behind.
+  Checked between databases, between pages, during nested-block fetching, and
+  before each image download
+- Progress now shows what a long page is actually doing (`Fetching blocks (12)`,
+  `Image 3/9`) instead of appearing frozen
+
 - **Nested content is now fetched.** Notion stores anything nested as a child
   block, reachable only by another API request per parent, so previously table
   rows, sub-bullets, and the bodies of toggles, callouts, columns and synced
@@ -24,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocks the UI and there is currently no way to cancel a running sync
 
 ### Fixed
+
+- **The sync summary no longer disappears when something went wrong.** The dialog
+  timeout used `cond and nil or 5`, which in Lua always evaluates to `5` -- so the
+  intended stay-on-screen behaviour for failures never worked
+- Far fewer full-screen e-ink repaints during a sync: progress updates reuse one
+  widget with a partial refresh and are throttled to about one per second, instead
+  of tearing down and recreating the message with a forced full repaint per page
+- A mid-sync error now costs one page instead of escaping unprotected. The sync
+  loop is plain nested loops, so the error guard covers every page rather than
+  only the first
 
 - **List items no longer render at heading size or escape their list.** An `<li>`
   held inline text directly beside a block sibling, which is mixed content;

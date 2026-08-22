@@ -77,15 +77,21 @@ function util.urlEncode(s)
     end))
 end
 
--- Byte length of the UTF-8 character starting at `s:sub(i, i)`.
-function util.getUtf8CharSize(s, i)
-    local b = s:byte(i)
-    if not b then return 0 end
-    if b < 0x80 then return 1 end
-    if b >= 0xF0 then return 4 end
-    if b >= 0xE0 then return 3 end
-    if b >= 0xC0 then return 2 end
-    return 1 -- continuation byte; caller is mid-sequence
+-- Mirrors frontend/util.lua exactly. A previous version of this stub exposed a
+-- `getUtf8CharSize` helper that DOES NOT EXIST in KOReader -- a stub advertising
+-- an API the real module lacks is worse than no stub, because code written
+-- against it passes every test and then crashes on the device. Only stub things
+-- that actually exist upstream.
+util.UTF8_CHAR_PATTERN = '[%z\1-\127\194-\253][\128-\191]*'
+
+function util.splitToChars(text)
+    local tab = {}
+    if text ~= nil then
+        for uchar in text:gmatch(util.UTF8_CHAR_PATTERN) do
+            tab[#tab + 1] = uchar
+        end
+    end
+    return tab
 end
 
 M.util = util
@@ -363,6 +369,83 @@ M.socket = socket
 M.socketutil = socketutil
 
 --------------------------------------------------------------------------------
+-- KOReader UI, enough for main.lua to be LOADED
+--------------------------------------------------------------------------------
+--
+-- These do not simulate the UI. They exist so main.lua's module-level requires
+-- resolve, which makes its pure helpers (progress formatting, the sync report)
+-- testable. main.lua is the largest surface in the plugin and the one where
+-- device-only bugs keep surfacing, so being able to reach into it matters.
+--
+-- Widgets shown are recorded in M.shown for assertions.
+
+M.shown = {}
+
+local function widget_stub()
+    return {
+        new = function(_, opts)
+            local w = opts or {}
+            w.is_stub_widget = true
+            return w
+        end,
+    }
+end
+
+local UIManager = {
+    show = function(_, widget) M.shown[#M.shown + 1] = widget end,
+    close = function() end,
+    forceRePaint = function() end,
+    nextTick = function(_, fn) if fn then fn() end end,
+    scheduleIn = function() end,
+    unschedule = function() end,
+    preventStandby = function() end,
+    allowStandby = function() end,
+}
+
+-- Records progress text and can be told to report a cancellation.
+local Trapper = {
+    infos = {},
+    cancel_after = nil, -- set to N to have the Nth info() return false
+    wrap = function(_, fn) return fn() end,
+    info = function(self, text, fast_refresh)
+        self.infos[#self.infos + 1] = { text = text, fast = fast_refresh }
+        if self.cancel_after and #self.infos >= self.cancel_after then
+            return false
+        end
+        return true
+    end,
+    reset = function() return true end,
+    clear = function() return true end,
+}
+
+function Trapper.resetRecorder()
+    Trapper.infos = {}
+    Trapper.cancel_after = nil
+end
+
+M.UIManager = UIManager
+M.Trapper = Trapper
+
+local WidgetContainer = {
+    extend = function(self, tbl)
+        tbl = tbl or {}
+        return setmetatable(tbl, { __index = self })
+    end,
+}
+
+local LuaSettings = {
+    open = function()
+        local store = {}
+        return {
+            readSetting = function(_, key) return store[key] end,
+            saveSetting = function(_, key, value) store[key] = value end,
+            flush = function() end,
+            has = function(_, key) return store[key] ~= nil end,
+        }
+    end,
+}
+
+--------------------------------------------------------------------------------
 -- Install stubs
 --------------------------------------------------------------------------------
 
@@ -373,6 +456,28 @@ package.preload["socket.http"] = function() return http end
 package.preload["ssl.https"] = function() return https end
 package.preload["socketutil"] = function() return socketutil end
 package.preload["rapidjson"] = function() return rapidjson end
+package.preload["ui/uimanager"] = function() return UIManager end
+package.preload["ui/trapper"] = function() return Trapper end
+package.preload["ui/widget/container/widgetcontainer"] = function() return WidgetContainer end
+package.preload["luasettings"] = function() return LuaSettings end
+package.preload["dispatcher"] = function()
+    return { registerAction = function() end }
+end
+package.preload["datastorage"] = function()
+    return {
+        getSettingsDir = function() return "/tmp" end,
+        getFullDataDir = function() return "/tmp/koreader" end,
+    }
+end
+package.preload["ui/network/manager"] = function()
+    return { runWhenOnline = function(_, fn) if fn then fn() end end }
+end
+for _, widget in ipairs({
+    "ui/widget/infomessage", "ui/widget/inputdialog", "ui/widget/buttondialog",
+    "ui/widget/confirmbox", "ui/widget/pathchooser",
+}) do
+    package.preload[widget] = function() return widget_stub() end
+end
 package.preload["util"] = function() return util end
 package.preload["libs/libkoreader-lfs"] = function() return lfs end
 package.preload["ffi/util"] = function() return ffiutil end
