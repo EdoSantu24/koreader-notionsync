@@ -72,6 +72,65 @@ describe("retry_budget", function()
     end)
 end)
 
+-- Notion splits a title into a separate rich-text object at every formatting or
+-- mention boundary, so reading only [1] truncated the title there.
+describe("titles", function()
+    local function title_prop(segments)
+        return { properties = { Name = { type = "title", title = segments } } }
+    end
+
+    it("concatenates_all_segments", function()
+        local page = title_prop {
+            { plain_text = "Chapter " },
+            { plain_text = "One", annotations = { bold = true } },
+        }
+        assert_eq(API:getPageTitle(page), "Chapter One")
+    end)
+
+    it("survives_a_mention_in_the_middle", function()
+        local page = title_prop {
+            { plain_text = "Meeting with " },
+            { plain_text = "Alice", type = "mention" },
+            { plain_text = " on Monday" },
+        }
+        assert_eq(API:getPageTitle(page), "Meeting with Alice on Monday")
+    end)
+
+    it("keeps_non_ascii_intact", function()
+        assert_eq(API:getPageTitle(title_prop { { plain_text = "读书笔记" } }), "读书笔记")
+    end)
+
+    it("falls_back_to_text_content", function()
+        local page = title_prop { { text = { content = "inner" } } }
+        assert_eq(API:getPageTitle(page), "inner")
+    end)
+
+    it("finds_the_title_property_whatever_it_is_named", function()
+        local page = { properties = {
+            Tags = { type = "multi_select" },
+            ["My Heading"] = { type = "title", title = { { plain_text = "Found" } } },
+        } }
+        assert_eq(API:getPageTitle(page), "Found")
+    end)
+
+    it("returns_untitled_when_there_is_nothing_usable", function()
+        assert_eq(API:getPageTitle({ properties = {} }), "Untitled")
+        assert_eq(API:getPageTitle({}), "Untitled")
+        assert_eq(API:getPageTitle(nil), "Untitled")
+        assert_eq(API:getPageTitle(title_prop {}), "Untitled")
+    end)
+
+    it("database_titles_concatenate_too", function()
+        local db = { title = { { plain_text = "Reading " }, { plain_text = "List" } } }
+        assert_eq(API:getDatabaseTitle(db), "Reading List")
+    end)
+
+    it("database_title_falls_back", function()
+        assert_eq(API:getDatabaseTitle({}), "Untitled")
+        assert_eq(API:getDatabaseTitle(nil), "Untitled")
+    end)
+end)
+
 describe("getBlockChildren_endpoint", function()
     -- Verifies the request URL without any network: apiCall is replaced with a
     -- recorder, which is enough to pin cursor handling.

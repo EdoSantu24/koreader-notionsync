@@ -96,7 +96,11 @@ An EPUB is built at `<name>.epub.part` and renamed into place only after the
 archive verifies, so the library can never contain a truncated book. A stray
 `.part` file means a sync died mid-write; it is safe to delete.
 
-Settings live elsewhere — `DataStorage:getSettingsDir()/notionsync.lua` via `LuaSettings`, not in `save_dir`. Sanitisation strips everything outside `[%w%s-_]` and truncates to 100 chars, so two Notion pages with titles differing only in punctuation collide on one file.
+Settings live elsewhere — `DataStorage:getSettingsDir()/notionsync.lua` via `LuaSettings`, not in `save_dir`.
+
+**Filenames** are produced by `storage:resolveFilenames(entries, ext)`, which takes the whole database at once rather than one page at a time. That is deliberate: if two titles sanitise to the same stem, **both** get a short page-id suffix, so the result does not depend on the order Notion returns pages in. Deciding per page would suffix only whichever arrived second, and the two files would swap names between runs.
+
+`sanitizeName` never touches bytes ≥ 0x80, which is what makes it UTF-8 safe without a `utf8` library. It replaces only genuinely unsafe characters, collapses runs to a single `_`, truncates on a character boundary within a **byte** budget (FAT32 counts bytes; one CJK character costs three), strips trailing dots and spaces, and escapes reserved Windows names — the user partition is FAT32 and files get copied off it over USB.
 
 ## Conventions and traps
 
@@ -145,14 +149,6 @@ reorder between cursor requests, which silently skips or duplicates them.
 **Edits in Notion never re-sync.** Sync state is keyed on page id alone, with no
 `last_edited_time` comparison, so a page fixed in Notion keeps its stale copy
 forever. `Clear sync history` in the menu is the only way to force a refresh.
-
-**Non-ASCII titles collapse.** `storage.lua:sanitizeFilename` is byte-oriented
-with an ASCII-only `%w`, so `读书笔记` becomes `untitled.epub`. Distinct pages
-overwrite each other while each is recorded as synced. Titles differing only in
-punctuation collide the same way.
-
-**Only the first rich-text segment of a title is read.** `api.lua:getPageTitle`
-takes `title[1].plain_text`, so `Chapter **One**` truncates to `"Chapter "`.
 
 **Lua trap worth knowing.** `cond and nil or 5` always evaluates to `5`, because
 `and nil` is falsy and falls through to the `or`. This shipped twice in the sync

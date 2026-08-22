@@ -612,9 +612,25 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
         page_count = opts.max_pages
       end
 
+      -- Filenames are resolved for the whole database up front so that two pages
+      -- whose titles sanitise to the same stem both get an id suffix, rather than
+      -- whichever happened to be processed second silently overwriting the first.
+      local titles = {}
+      for i = 1, page_count do
+        titles[i] = self.api:getPageTitle(pages[i])
+      end
+      local entries = {}
+      for i = 1, page_count do
+        entries[i] = { id = pages[i].id, title = titles[i] }
+      end
+      local filenames = self.storage:resolveFilenames(entries, ".epub")
+
       for page_index = 1, page_count do
         local page = pages[page_index]
-        local title = self.api:getPageTitle(page)
+        local title = titles[page_index]
+        -- Fallback covers a page with no id, which resolveFilenames cannot key.
+        local filename = filenames[page.id]
+          or self.storage:sanitizeFilename(title, ".epub")
 
         if not self:tick(self:progressText(db_index, db_count,
           page_index, page_count, title, ""), false) then
@@ -626,6 +642,7 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
           self:syncOnePage {
             page = page,
             title = title,
+            filename = filename,
             database = database,
             synced_ids = synced_ids,
             image_manager = image_manager,
@@ -657,7 +674,7 @@ function NotionSync:syncOnePage(ctx)
   -- The ":epub" suffix is retained so pages recorded by an earlier version are
   -- still recognised. Dropping it would silently force a full re-download.
   local sync_key = page.id .. ":epub"
-  local file_exists = self.storage:fileExists(title, ".epub", database.name)
+  local file_exists = self.storage:outputExists(ctx.filename, database.name)
 
   if ctx.synced_ids[sync_key] and file_exists then
     stats.unchanged = stats.unchanged + 1
@@ -706,7 +723,7 @@ function NotionSync:syncOnePage(ctx)
     date = page.last_edited_time,
     page_id = page.id,
     source = page.url,
-    output_path = self.storage:getOutputPath(title, database.name),
+    output_path = self.storage:getOutputPath(ctx.filename, database.name),
     image_urls = image_urls,
     fetch_image = function(url) return ctx.image_manager:fetch(url) end,
     on_progress = function()
