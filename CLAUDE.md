@@ -43,6 +43,7 @@ Releases: push to `main` produces a dev artifact; pushing a `v*` tag produces a 
 `main.lua` is the KOReader `WidgetContainer` — settings, menu, and the sync driver. Everything else is a stateless-ish module it orchestrates:
 
 - `api.lua` — Notion REST client (`ssl.https` + `rapidjson`). Pinned to Notion-Version `2022-06-28`.
+- `blocktree.lua` — fetches a page's block tree, recursing into children. Takes `api` as a parameter rather than requiring it, which is what makes it testable with a fake and no network.
 - `xhtml.lua` — Notion block JSON → XHTML, plus `collectImageURLs`. Owns the escaping chokepoint and the stylesheet. Depends on `logger` only, which is what keeps it unit-testable off-device.
 - `epub.lua` — EPUB 2 assembly via KOReader's `ffi/archiver`: streams images, writes the package documents, verifies the archive.
 - `imagemanager.lua` — fetches image bytes into memory (`fetch(url) -> content, content_type`). Deliberately knows nothing about the filesystem.
@@ -52,7 +53,7 @@ There is no Markdown anywhere in the pipeline any more. `converter.lua` and the 
 
 ### Sync data flow
 
-For each selected database → each page: `queryDatabase` → `getBlockChildren` → `xhtml.collectImageURLs` → `epub.build{...}`.
+For each selected database → each page: `queryDatabase` → `blocktree.fetchPage` (which fans out into many `getBlockChildren` calls) → `xhtml.collectImageURLs` → `epub.build{...}`.
 
 `epub.build` drives the rest through two callbacks the caller supplies, which is what keeps `epub.lua` free of any Notion knowledge and independently testable:
 
@@ -115,13 +116,15 @@ These are confirmed and reproduced, not suspicions. Each is **pinned by a test**
 in `spec/`, so the fix shows up as a deliberate test change rather than an
 unnoticed shift in output.
 
-**Child blocks are never fetched.** `getBlockChildren` is called once per page and
-nothing recurses, so anything Notion stores as a child is unavailable: **table
-rows**, nested list levels, and the bodies of toggles, callouts, columns and
-synced blocks. The renderer handles all of these correctly *when children are
-present* and emits a visible placeholder when they are not, so this shows up as
-`[table rows not fetched]` rather than as silence. Fixing it means recursive
-fetching with a depth cap and a request budget.
+**Nested content is bounded, not complete.** `blocktree.lua` fetches child blocks
+breadth-first, but with a depth cap (3) and a per-page request budget (40),
+because each parent costs one API call. Exceeding either is reported in the sync
+summary and renders a visible placeholder; it is never silent. Two rules in there
+are load-bearing: structural containers (`table`, `column_list`, `column`,
+`synced_block`) must **not** consume a depth level, or a table spends its whole
+allowance on structure and arrives with no rows; and `child_page` is never
+recursed into, since that is a separate document and would pull in an unbounded
+subtree.
 
 **No pagination.** `searchDatabases` caps at 20 databases, `queryDatabase` at 20
 pages per database, `getBlockChildren` at 100 blocks per page, and no

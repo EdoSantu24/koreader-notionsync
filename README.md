@@ -12,7 +12,7 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 - [x] Working table of contents, built from the page's headings
 - [x] Unsupported Notion blocks are reported, never silently dropped
 - [x] Automatic sync history tracking to avoid re-syncing unchanged pages
-- [ ] Table rows, nested lists and toggle/column contents (needs child-block fetching)
+- [x] Table rows, nested lists, and toggle/callout/column contents
 - [ ] Re-sync pages edited in Notion (no `last_edited_time` check yet)
 - [ ] Sync highlights and annotations from KOReader back to Notion
 - [ ] Automatic synchronization on schedule or other trigger
@@ -228,13 +228,16 @@ will report how many failed — images are never silently omitted.
 Check that the device had network access for the whole sync, and note that images
 over 8 MB are skipped deliberately.
 
-### Tables Are Empty
+### Some Nested Content Is Missing
 
-Tables show `[table rows not fetched]`. Notion stores table rows as *child*
-blocks, and the plugin does not yet fetch those. The same applies to nested list
-levels and the contents of toggles, callouts and columns — all of which render a
-visible placeholder rather than disappearing. Recursive fetching is the next
-change planned.
+Notion stores nested content as *child blocks*, each needing its own API request.
+To keep a sync from taking forever, there is a limit on how many requests one
+page may use (**Tools → Notion Sync → Nested content limit**, default 40).
+
+A page that hits the limit is reported in the sync summary, and anything not
+retrieved shows a visible placeholder rather than disappearing. If a deeply
+nested page is missing content, raise the limit to 100 — at the cost of a slower
+sync. Nesting deeper than three levels is not followed.
 
 ### "DEVICE_MOUNT_PATH is not set" Error (Developers)
 

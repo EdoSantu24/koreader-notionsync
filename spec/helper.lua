@@ -306,10 +306,73 @@ end
 M.Archiver = Archiver
 
 --------------------------------------------------------------------------------
+-- Network modules
+--------------------------------------------------------------------------------
+--
+-- Present so that api.lua and imagemanager.lua can be LOADED off-device; they do
+-- not simulate HTTP. Tests that need request behaviour replace the method under
+-- test (see api_spec's apiCall recorder) rather than driving these.
+--
+-- Without them, requiring api.lua throws at spec load time -- which previously
+-- took the whole suite down with no summary, because the runner did not wrap
+-- spec-file execution. Both halves of that are fixed.
+
+local ltn12 = {
+    sink = { table = function(t) return function(chunk)
+        if chunk then t[#t + 1] = chunk end
+        return 1
+    end end },
+    source = { string = function(s) return function() return s end end },
+}
+
+local socket = {
+    -- Mirrors LuaSocket: drops the first n return values.
+    skip = function(n, ...) return select(n + 1, ...) end,
+    sleep = function(seconds) M.slept = (M.slept or 0) + (seconds or 0) end,
+}
+
+local https = { request = function() return nil, "no network in tests" end }
+local http = { request = function() return nil, "no network in tests" end }
+
+-- Values match frontend/socketutil.lua so that a test asserting on timeout
+-- choice is meaningful.
+local socketutil = {
+    LARGE_BLOCK_TIMEOUT = 10,
+    LARGE_TOTAL_TIMEOUT = 30,
+    FILE_BLOCK_TIMEOUT = 15,
+    FILE_TOTAL_TIMEOUT = 60,
+    -- Called as socketutil:set_timeout(...), so the receiver arrives positionally.
+    set_timeout = function(_, block, total)
+        M.last_timeout = { block = block, total = total }
+    end,
+    reset_timeout = function() M.last_timeout = nil end,
+    table_sink = function(t)
+        return function(chunk)
+            if chunk then t[#t + 1] = chunk end
+            return 1
+        end
+    end,
+}
+
+local rapidjson = {
+    encode = function() return "{}" end,
+    decode = function() return {} end,
+}
+
+M.socket = socket
+M.socketutil = socketutil
+
+--------------------------------------------------------------------------------
 -- Install stubs
 --------------------------------------------------------------------------------
 
 package.preload["logger"] = function() return logger end
+package.preload["ltn12"] = function() return ltn12 end
+package.preload["socket"] = function() return socket end
+package.preload["socket.http"] = function() return http end
+package.preload["ssl.https"] = function() return https end
+package.preload["socketutil"] = function() return socketutil end
+package.preload["rapidjson"] = function() return rapidjson end
 package.preload["util"] = function() return util end
 package.preload["libs/libkoreader-lfs"] = function() return lfs end
 package.preload["ffi/util"] = function() return ffiutil end
@@ -457,7 +520,7 @@ M.PLUGIN_DIR = PLUGIN_DIR
 
 -- Every non-vendored plugin module, for the syntax check.
 M.PLUGIN_MODULES = {
-    "_meta", "api", "epub", "imagemanager", "main", "storage", "xhtml",
+    "_meta", "api", "blocktree", "epub", "imagemanager", "main", "storage", "xhtml",
 }
 
 _G.helper = M

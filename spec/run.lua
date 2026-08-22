@@ -25,6 +25,8 @@ local SPEC_FILES = {
     "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",
+    "spec/blocktree_spec.lua",
+    "spec/api_spec.lua",
 }
 
 --------------------------------------------------------------------------------
@@ -114,7 +116,19 @@ for _, path in ipairs(SPEC_FILES) do
         failures[#failures + 1] = { label = path, err = "could not load: " .. tostring(err) }
         print(string.format("  %s -- LOAD FAILED", path))
     else
-        chunk()
+        -- Wrapped, because a spec file that throws at TOP level -- outside any
+        -- it() -- would otherwise abort the whole run with no summary line, and a
+        -- silently skipped file looks identical to a passing one. This happened:
+        -- a spec requiring a module with no stub took the entire suite down.
+        local ran, run_err = pcall(chunk)
+        if not ran then
+            failed = failed + 1
+            failures[#failures + 1] = {
+                label = path,
+                err = "error while loading spec file: " .. tostring(run_err),
+            }
+            print(string.format("  %s -- ERRORED ON LOAD", path))
+        end
     end
 end
 
