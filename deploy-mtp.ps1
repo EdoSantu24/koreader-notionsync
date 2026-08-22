@@ -101,21 +101,39 @@ function Wait-ForFile($folderItem, [string]$name, [int64]$expectedSize, [int]$ti
     return $false
 }
 
-# Used when the new file is the same length as the old one, so a size check
-# cannot tell whether the overwrite actually happened.
-function Wait-ForModified($folderItem, [string]$name, $previousDate, [int]$timeoutSec = 20) {
-    if (-not $previousDate) { return $true }
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
-    while ((Get-Date) -lt $deadline) {
-        $found = Get-ShellChild $folderItem $name
-        if (-not $found) { $found = Get-ShellChild $folderItem $stem }
-        if ($found -and $found.ExtendedProperty('System.DateModified') -ne $previousDate) {
-            return $true
+# Used when the new file is the same length as the old one, so a size check cannot
+# tell whether the overwrite happened.
+#
+# An earlier version watched the modification timestamp instead, but MTP does not
+# reliably advance it when the content is unchanged -- so deploying a file that was
+# already correct was reported as a FAILURE. Reading the bytes back is slower but
+# it actually answers the question, and it only runs for the ambiguous same-size
+# case.
+function Test-DeviceContentMatches($folderItem, [string]$name, [string]$localPath) {
+    $shell = New-Object -ComObject Shell.Application
+    $temp = Join-Path $env:TEMP ("ns-verify-" + [System.Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temp -Force | Out-Null
+    try {
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
+        $item = Get-ShellChild $folderItem $name
+        if (-not $item) { $item = Get-ShellChild $folderItem $stem }
+        if (-not $item) { return $false }
+
+        $shell.NameSpace($temp).CopyHere($item, $COPY_FLAGS)
+        $deadline = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $deadline) {
+            if (@(Get-ChildItem $temp -File).Count -ge 1) { break }
+            Start-Sleep -Milliseconds 300
         }
-        Start-Sleep -Milliseconds 400
+        $pulled = Get-ChildItem $temp -File | Select-Object -First 1
+        if (-not $pulled) { return $false }
+
+        $local = Get-FileHash -Path $localPath -Algorithm MD5
+        $remote = Get-FileHash -Path $pulled.FullName -Algorithm MD5
+        return $local.Hash -eq $remote.Hash
+    } finally {
+        Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    return $false
 }
 
 Write-Host ""
@@ -245,22 +263,20 @@ foreach ($file in $sourceFiles) {
     # Overwriting with the flags below is silent and reliable -- do not reintroduce
     # a delete step here.
     $existingSize = $null
-    $existingDate = $null
     $old = Get-ShellChild $existing $file.Name
     if (-not $old) { $old = Get-ShellChild $existing $file.BaseName }
     if ($old) {
         $existingSize = $old.ExtendedProperty('Size')
-        $existingDate = $old.ExtendedProperty('System.DateModified')
     }
 
     $targetFolder.CopyHere($file.FullName, $COPY_FLAGS)
 
     # A size match normally proves the copy landed, because a changed file has a
-    # different length. When the length happens to be identical, fall back to
-    # waiting for the modification time to advance.
+    # different length. When the length is identical the size proves nothing, so
+    # the bytes are compared instead.
     $confirmed = Wait-ForFile $existing $file.Name $file.Length
     if ($confirmed -and $existingSize -eq $file.Length) {
-        $confirmed = Wait-ForModified $existing $file.Name $existingDate
+        $confirmed = Test-DeviceContentMatches $existing $file.Name $file.FullName
     }
 
     if ($confirmed) {

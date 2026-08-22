@@ -42,6 +42,11 @@ function NotionSync:init()
     or NotionBlockTree.DEFAULT_MAX_DEPTH
   self.request_budget = self.settings:readSetting "request_budget"
     or NotionBlockTree.DEFAULT_REQUEST_BUDGET
+  -- Every cursor page is now followed, so a large database is no longer silently
+  -- capped at 20 pages. This bounds how long one database can take; 0 means no
+  -- limit beyond the API request backstop.
+  self.max_pages_per_database = self.settings:readSetting "max_pages_per_database"
+    or 200
 
   self.api = NotionAPI:new(self.notion_token)
   self.storage = NotionStorage:new(self.save_dir)
@@ -129,6 +134,41 @@ function NotionSync:addToMainMenu(menu_items)
             callback = function() self:setRequestBudget(100) end,
           },
         },
+      },
+      {
+        text_func = function()
+          if self.max_pages_per_database == 0 then
+            return _ "Pages per database (no limit)"
+          end
+          return T(_ "Pages per database (%1)", self.max_pages_per_database)
+        end,
+        sub_item_table = {
+          {
+            text = _ "Maximum pages fetched per database",
+            enabled = false,
+          },
+          {
+            text = _ "100",
+            checked_func = function() return self.max_pages_per_database == 100 end,
+            callback = function() self:setMaxPages(100) end,
+          },
+          {
+            text = _ "200 (default)",
+            checked_func = function() return self.max_pages_per_database == 200 end,
+            callback = function() self:setMaxPages(200) end,
+          },
+          {
+            text = _ "1000",
+            checked_func = function() return self.max_pages_per_database == 1000 end,
+            callback = function() self:setMaxPages(1000) end,
+          },
+          {
+            text = _ "No limit",
+            checked_func = function() return self.max_pages_per_database == 0 end,
+            callback = function() self:setMaxPages(0) end,
+          },
+        },
+        separator = true,
       },
       {
         text_func = function() return T(_ "Save Directory (%1)", self.save_dir) end,
@@ -238,6 +278,18 @@ function NotionSync:setRequestBudget(value)
   })
 end
 
+function NotionSync:setMaxPages(value)
+  self.max_pages_per_database = value
+  self.settings:saveSetting("max_pages_per_database", value)
+  self.settings:flush()
+  UIManager:show(InfoMessage:new {
+    text = value == 0
+      and _ "No page limit per database."
+      or T(_ "Fetching at most %1 pages per database.", value),
+    timeout = 2,
+  })
+end
+
 function NotionSync:confirmClearSyncHistory()
   local count = self.storage:countSyncedIds()
   if count == 0 then
@@ -316,21 +368,28 @@ function NotionSync:showDatabaseSelector()
       timeout = 2,
     })
 
-    local success, result = self.api:searchDatabases()
+    local success, databases = self.api:getAllDatabases()
     if not success then
       UIManager:show(InfoMessage:new {
-        text = T(_ "Failed to fetch databases: %1", result),
+        text = T(_ "Failed to fetch databases: %1", databases),
         timeout = 3,
       })
       return
     end
-    if not result.results or #result.results == 0 then
+    if #databases == 0 then
       UIManager:show(InfoMessage:new {
         text = _ "No databases found",
         timeout = 3,
       })
       return
     end
+
+    -- Sorted here rather than by the API: /v1/search's sort options are narrow
+    -- and a wrong key is a 400 that would break the picker outright. Sorting by
+    -- name costs nothing and is more useful for choosing from a list anyway.
+    table.sort(databases, function(a, b)
+      return self.api:getDatabaseTitle(a) < self.api:getDatabaseTitle(b)
+    end)
 
     -- Store working copy of selections
     local temp_selections = {}
@@ -369,7 +428,7 @@ function NotionSync:showDatabaseSelector()
       -- Build button list (ButtonDialog needs 2D array: each button is a row)
       local buttons = {}
 
-      for _, db in ipairs(result.results) do
+      for _, db in ipairs(databases) do
         local db_id = db.id
         local db_name = self.api:getDatabaseTitle(db)
         local selected = isSelected(db_id)
@@ -547,6 +606,7 @@ function NotionSync:runSync(opts)
     failed = 0,
     truncated = 0,
     partial = 0,
+    page_limited = 0,
     failed_titles = {},
     unsupported = {},
     cancelled = false,
@@ -599,14 +659,26 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
       break
     end
 
-    local ok_query, result = self.api:queryDatabase(database.id, 20)
+    -- Follows every cursor page. Previously only the first 20 pages of a
+    -- database existed as far as the plugin was concerned, with no indication
+    -- that anything had been left behind.
+    -- opts.max_pages (the debug single-page sync) must also bound the FETCH, not
+    -- just trim afterwards: paging through 200 pages to then use one defeats the
+    -- point of a debug path that is supposed to take seconds.
+    local fetch_limit = opts.max_pages or self.max_pages_per_database
+    local ok_query, pages, query_truncated =
+      self.api:getAllPages(database.id, fetch_limit)
+
     if not ok_query then
       -- A whole database dropping out is counted, not merely logged.
-      logger.warn("NotionSync: query failed for", database.name, tostring(result))
+      logger.warn("NotionSync: query failed for", database.name, tostring(pages))
       stats.failed = stats.failed + 1
       stats.failed_titles[#stats.failed_titles + 1] = database.name
     else
-      local pages = result.results or {}
+      if query_truncated then
+        stats.page_limited = stats.page_limited + 1
+      end
+
       local page_count = #pages
       if opts.max_pages and opts.max_pages < page_count then
         page_count = opts.max_pages
@@ -811,6 +883,9 @@ function NotionSync:showSyncReport(stats, image_manager)
   end
   if stats.partial > 0 then
     lines[#lines + 1] = T(_ "%1 page(s) had nested content unavailable", stats.partial)
+  end
+  if stats.page_limited > 0 then
+    lines[#lines + 1] = T(_ "%1 database(s) hit the page limit", stats.page_limited)
   end
 
   local unsupported = {}

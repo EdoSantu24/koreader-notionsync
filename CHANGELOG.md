@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **All databases, and all pages in a database, are now synced.** Nothing followed
+  a cursor before, so only the first 20 databases and the first 20 pages of each
+  existed as far as the plugin was concerned -- with no indication anything had
+  been left behind. Page size is now the API maximum of 100 and every cursor page
+  is followed
+- Pages are fetched in a **stable order** (`created_time` ascending). Previously
+  no sort was sent, so *which* 20 pages you got could differ between runs
+- **Pages per database** setting (100 / 200 / 1000 / no limit, default 200), since
+  removing the cap changes how long a large database takes. Databases that hit the
+  limit are reported in the sync summary
+- The database picker now lists every shared database, sorted by name
+
 - **Notion Sync Now** is now usable as a gesture or profile action. The Dispatcher
   action was registered but had no handler, so anything bound to it did nothing
 - Starting a sync while one is already running is now refused, rather than the
