@@ -78,9 +78,9 @@ function NotionSync:addToMainMenu(menu_items)
         callback = function() self:showDatabaseSelector() end,
       },
       {
-        -- Until now the only way to force a re-sync was the side effect of
-        -- switching output format, which cleared the history. With Markdown
-        -- output gone, this is the replacement for that capability.
+        -- The plugin skips pages it has already synced and has no
+        -- last_edited_time check, so this is the only way to pick up edits made
+        -- in Notion or to recover from a bad sync.
         text = _ "Clear sync history",
         callback = function() self:confirmClearSyncHistory() end,
         separator = true,
@@ -155,15 +155,18 @@ function NotionSync:confirmClearSyncHistory()
     ),
     ok_text = _ "Clear",
     ok_callback = function()
-      if self.storage:clearSyncHistory() then
+      local cleared, err = self.storage:clearSyncHistory()
+      if cleared then
         UIManager:show(InfoMessage:new {
           text = _ "Sync history cleared.",
           timeout = 2,
         })
       else
+        -- Include the reason: "could not" alone gives the user nothing to act on,
+        -- and the usual causes (read-only mount, missing save directory) are fixable.
         UIManager:show(InfoMessage:new {
-          text = _ "Could not clear sync history.",
-          timeout = 3,
+          text = T(_ "Could not clear sync history: %1", tostring(err)),
+          timeout = 5,
         })
       end
     end,

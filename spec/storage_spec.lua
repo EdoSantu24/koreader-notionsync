@@ -16,16 +16,18 @@ describe("sanitizeFilename", function()
         assert_eq(S:sanitizeFilename("Hello World", ".epub"), "Hello_World.epub")
     end)
 
-    it("defaults_extension_to_md", function()
-        assert_eq(S:sanitizeFilename("Notes"), "Notes.md")
+    -- EPUB is the only output format, so an omitted extension must not produce a
+    -- filename that fileExists() could never match against what saveEpub() writes.
+    it("defaults_extension_to_epub", function()
+        assert_eq(S:sanitizeFilename("Notes"), "Notes.epub")
     end)
 
     it("collapses_whitespace_runs", function()
-        assert_eq(S:sanitizeFilename("a   b", ".md"), "a_b.md")
+        assert_eq(S:sanitizeFilename("a   b", ".epub"), "a_b.epub")
     end)
 
     it("strips_path_separators", function()
-        assert_not_contains(S:sanitizeFilename("a/b", ".md"), "/")
+        assert_not_contains(S:sanitizeFilename("a/b", ".epub"), "/")
     end)
 
     -- BUG: the pattern [^%w%s-_] is byte-oriented, and %w is ASCII-only, so every

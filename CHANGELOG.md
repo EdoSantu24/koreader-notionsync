@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output shared all of the EPUB path's block-coverage gaps and would have needed
   a parallel rewrite; dropping it removes an entire duplicate code path
 
+  If you were using Markdown output: every page will re-download once as EPUB
+  (sync history is keyed per format, so previous `.md` entries no longer match),
+  and your existing `.md` files are left on the device untouched. Delete them by
+  hand if you don't want them.
+
 ### Added
 
 - **Tools → Notion Sync → Clear sync history**, with a confirmation showing how
