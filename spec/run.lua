@@ -22,7 +22,7 @@ local current_group = ""
 -- directory listing needs lfs, which is exactly the dependency we are avoiding.
 local SPEC_FILES = {
     "spec/syntax_spec.lua",
-    "spec/converter_spec.lua",
+    "spec/xhtml_spec.lua",
     "spec/storage_spec.lua",
     "spec/epub_spec.lua",
 }

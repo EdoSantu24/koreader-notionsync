@@ -46,12 +46,6 @@ read_globals = {
 -- why the warning is wrong rather than inconvenient.
 ignore = {}
 
-exclude_files = {
-    -- Vendored third-party Markdown parser (Niklas Frykholm's markdown.lua).
-    -- Scheduled for deletion once the direct block -> XHTML renderer lands.
-    "notionsync.koplugin/markdown.lua",
-}
-
 -- The test suite runs under a plain LuaJIT with no KOReader present. Its runner
 -- (spec/run.lua) intentionally publishes the describe/it/assert_* harness as
 -- globals, so both writing and reading them has to be permitted -- hence

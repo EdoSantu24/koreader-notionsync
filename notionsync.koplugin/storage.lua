@@ -128,61 +128,16 @@ function NotionStorage:fileExists(title, extension, database_name)
     return false
 end
 
-function NotionStorage:saveEpub(title, html_content, database_name, temp_image_dir)
-    local filename = self:sanitizeFilename(title, ".epub")
-
-    -- Ensure database directory exists and get path
+-- Full path a page's EPUB should be written to, creating the per-database
+-- directory if needed.
+--
+-- Writing is the EPUB builder's job, not this module's. It used to `dofile`
+-- epub.lua on every single save -- which also re-loaded the 1212-line Markdown
+-- parser each time, around 120 compiles for a 60-page sync -- and kept a second,
+-- divergent module instance alive alongside the caller's.
+function NotionStorage:getOutputPath(title, database_name)
     local db_dir = self:ensureDatabaseDirectory(database_name)
-    local filepath = ffiUtil.joinPath(db_dir, filename)
-
-    logger.info(string.format("NotionStorage: saveEpub called for '%s'", title))
-    logger.info(string.format("NotionStorage: Target filepath: %s", filepath))
-
-    -- Load EPUB creator
-    local plugin_dir = debug.getinfo(1).source:match("@?(.*/)") or ""
-    logger.info(string.format("NotionStorage: Plugin dir: %s", plugin_dir))
-
-    local NotionEpub = dofile(plugin_dir .. "epub.lua")
-
-    logger.info("NotionStorage: Calling NotionEpub:createEpub")
-    local success = NotionEpub:createEpub(title, html_content, filepath, temp_image_dir)
-    logger.info(string.format("NotionStorage: createEpub returned: %s", tostring(success)))
-
-    if success then
-        logger.info("NotionStorage: Saved EPUB", filepath)
-        return true, filepath
-    else
-        logger.warn("NotionStorage: Failed to save EPUB", filepath)
-        return false, nil
-    end
-end
-
-function NotionStorage:getTempImageDir()
-    return ffiUtil.joinPath(self.sync_dir, ".notion_image_cache")
-end
-
-function NotionStorage:ensureTempImageDir()
-    local temp_dir = self:getTempImageDir()
-    self:ensureDirectory(temp_dir)
-    return temp_dir
-end
-
-function NotionStorage:cleanupTempImages()
-    local temp_dir = self:getTempImageDir()
-    local mode = lfs.attributes(temp_dir, "mode")
-    if mode == "directory" then
-        logger.info("NotionStorage: Cleaning up temp images at", temp_dir)
-        -- Remove all files in temp directory
-        for entry in lfs.dir(temp_dir) do
-            if entry ~= "." and entry ~= ".." then
-                local entry_path = ffiUtil.joinPath(temp_dir, entry)
-                os.remove(entry_path)
-            end
-        end
-        -- Remove the directory itself
-        os.remove(temp_dir)
-        logger.info("NotionStorage: Temp images cleaned up")
-    end
+    return ffiUtil.joinPath(db_dir, self:sanitizeFilename(title, ".epub"))
 end
 
 return NotionStorage

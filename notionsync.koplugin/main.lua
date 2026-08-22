@@ -17,9 +17,9 @@ local T = require("ffi/util").template
 -- Load plugin modules using dofile for local plugin files
 local plugin_dir = debug.getinfo(1).source:match "@?(.*/)" or ""
 local NotionAPI = dofile(plugin_dir .. "api.lua")
-local NotionConverter = dofile(plugin_dir .. "converter.lua")
 local NotionStorage = dofile(plugin_dir .. "storage.lua")
 local NotionEpub = dofile(plugin_dir .. "epub.lua")
+local NotionXhtml = dofile(plugin_dir .. "xhtml.lua")
 local ImageManager = dofile(plugin_dir .. "imagemanager.lua")
 
 local NotionSync = WidgetContainer:extend {
@@ -34,7 +34,6 @@ function NotionSync:init()
   self.selected_databases = self.settings:readSetting "selected_databases" or {}
   self.save_dir = self.settings:readSetting "save_dir" or "/mnt/onboard/notion_sync"
   self.api = NotionAPI:new(self.notion_token)
-  self.converter = NotionConverter
   self.storage = NotionStorage:new(self.save_dir)
   self.storage:initialize()
   self.ui.menu:registerToMainMenu(self)
@@ -58,6 +57,16 @@ function NotionSync:addToMainMenu(menu_items)
       {
         text = _ "Sync Now",
         callback = function() self:syncNow() end,
+      },
+      {
+        -- On-device iteration is the only way to verify rendering, and a full
+        -- sync takes minutes. This does one page so that loop takes seconds, and
+        -- dumps the generated markup so a rendering problem can be inspected
+        -- rather than guessed at.
+        text = _ "Sync one page (debug)",
+        callback = function()
+          self:syncNow { max_databases = 1, max_pages = 1, dump_xhtml = true }
+        end,
       },
       {
         text_func = function()
@@ -136,6 +145,51 @@ function NotionSync:showTokenInput()
   }
   UIManager:show(input_dialog)
   input_dialog:onShowKeyboard()
+end
+
+-- Writes a diagnostic file next to the synced books, where it can be copied off
+-- the device over USB.
+function NotionSync:writeDebugFile(name, content)
+  local path = self.save_dir .. "/" .. name
+  local file = io.open(path, "w")
+  if not file then
+    logger.warn("NotionSync: could not write debug file", path)
+    return false
+  end
+  file:write(content)
+  file:close()
+  logger.info("NotionSync: wrote debug file", path)
+  return true
+end
+
+-- A flat outline of what the API actually returned, so a rendering problem can be
+-- traced back to the block structure that produced it.
+function NotionSync:describeBlocks(blocks, image_map)
+  local lines = {}
+  local function walk(list, indent)
+    for _, block in ipairs(list or {}) do
+      local note = ""
+      if block.has_children then
+        local fetched = type(block.children) == "table" and #block.children or 0
+        note = string.format("  has_children=true fetched=%d", fetched)
+      end
+      lines[#lines + 1] = string.format("%s%s%s", indent, tostring(block.type), note)
+      if type(block.children) == "table" then
+        walk(block.children, indent .. "  ")
+      end
+    end
+  end
+  walk(blocks, "")
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "image map:"
+  local any = false
+  for url, href in pairs(image_map or {}) do
+    any = true
+    lines[#lines + 1] = "  " .. href .. "  <-  " .. url:sub(1, 120)
+  end
+  if not any then lines[#lines + 1] = "  (empty: no image was embedded)" end
+  return table.concat(lines, "\n") .. "\n"
 end
 
 function NotionSync:confirmClearSyncHistory()
@@ -333,7 +387,11 @@ function NotionSync:showDatabaseSelector()
   end)
 end
 
-function NotionSync:syncNow()
+-- opts.max_pages / opts.max_databases cap the run, which is what the debug
+-- single-page sync uses to make on-device iteration take seconds instead of
+-- minutes.
+function NotionSync:syncNow(opts)
+  opts = opts or {}
   NetworkMgr:runWhenOnline(function()
     -- Validate that user has selected databases
     if #self.selected_databases == 0 then
@@ -353,16 +411,17 @@ function NotionSync:syncNow()
     UIManager:nextTick(function()
       -- Wrap in pcall to catch errors
       local ok, err = pcall(function()
-        -- Cleanup old temp images from previous sync
-        self.storage:cleanupTempImages()
-
-        local temp_dir = self.storage:ensureTempImageDir()
-        local image_manager = ImageManager:new(temp_dir)
-        logger.info "NotionSync: ImageManager initialized"
+        local image_manager = ImageManager:new()
 
         local total_new = 0
         local total_old = 0
+        local total_failed = 0
+        local failed_titles = {}
+        local unsupported = {}
         local total_databases = #self.selected_databases
+        if opts.max_databases and opts.max_databases < total_databases then
+          total_databases = opts.max_databases
+        end
         local extension = ".epub"
         local synced_ids = self.storage:getSyncedIds()
 
@@ -374,31 +433,53 @@ function NotionSync:syncNow()
             -- All databases done
             UIManager:close(progress_message)
 
-            -- Cleanup and get image stats
+            -- The headline must reflect reality: reporting "complete" while pages
+            -- failed is how content loss went unnoticed before.
             local result_lines = {
-              string.format "Sync complete!",
-              string.format("New: %d", total_new),
-              string.format("Old: %d", total_old),
-              string.format("Databases: %d", total_databases),
+              total_failed > 0 and string.format("Sync finished with %d problem(s)", total_failed)
+                or "Sync complete!",
+              string.format("New: %d   Unchanged: %d", total_new, total_old),
             }
 
-            local img_stats = image_manager:getStats()
-            if img_stats.downloaded > 0 or img_stats.failed > 0 then
-              table.insert(
-                result_lines,
-                string.format(
-                  "Images: %d downloaded, %d cached, %d failed",
-                  img_stats.downloaded,
-                  img_stats.cached,
-                  img_stats.failed
-                )
-              )
+            if total_failed > 0 then
+              local names = {}
+              for i = 1, math.min(3, #failed_titles) do
+                names[#names + 1] = failed_titles[i]
+              end
+              local suffix = #failed_titles > 3
+                and string.format(", +%d more", #failed_titles - 3) or ""
+              table.insert(result_lines,
+                string.format("Failed: %s%s", table.concat(names, ", "), suffix))
             end
-            image_manager:cleanup()
+
+            local img_stats = image_manager:getStats()
+            if img_stats.downloaded > 0 or img_stats.failed > 0
+              or img_stats.skipped_too_large > 0 then
+              table.insert(result_lines, string.format(
+                "Images: %d embedded, %d failed", img_stats.downloaded, img_stats.failed))
+              if img_stats.skipped_too_large > 0 then
+                table.insert(result_lines,
+                  string.format("%d image(s) too large, skipped", img_stats.skipped_too_large))
+              end
+            end
+
+            -- Blocks the renderer did not recognise are reported rather than
+            -- vanishing, so an unhandled Notion feature is discoverable.
+            local unsupported_parts = {}
+            for btype, count in pairs(unsupported) do
+              unsupported_parts[#unsupported_parts + 1] =
+                string.format("%s (%d)", btype, count)
+            end
+            if #unsupported_parts > 0 then
+              table.sort(unsupported_parts)
+              table.insert(result_lines,
+                "Unsupported blocks: " .. table.concat(unsupported_parts, ", "))
+            end
 
             UIManager:show(InfoMessage:new {
               text = table.concat(result_lines, "\n"),
-              timeout = 5,
+              -- Bad news must not disappear before it can be read.
+              timeout = total_failed > 0 and nil or 5,
             })
             return
           end
@@ -432,6 +513,9 @@ function NotionSync:syncNow()
                 result
               )
             )
+            -- A whole database dropping out must be counted, not just logged.
+            total_failed = total_failed + 1
+            failed_titles[#failed_titles + 1] = database.name
             -- Continue to next database
             UIManager:nextTick(function() processDatabase(db_index + 1) end)
             return
@@ -447,6 +531,9 @@ function NotionSync:syncNow()
           end
 
           local page_count = #result.results
+          if opts.max_pages and opts.max_pages < page_count then
+            page_count = opts.max_pages
+          end
           logger.info(
             string.format(
               "NotionSync: Database '%s' has %d pages",
@@ -494,39 +581,62 @@ function NotionSync:syncNow()
 
             if should_sync then
               local blocks_success, blocks_result = self.api:getBlockChildren(page.id)
-              if blocks_success and blocks_result.results then
-                -- Image URLs must be collected before conversion, so the local
-                -- paths are known by the time the HTML is generated.
-                local image_urls = self.converter:extractImageURLs(blocks_result.results)
 
-                local image_mappings = {}
-                for img_idx, url in ipairs(image_urls) do
-                  local local_path = image_manager:downloadImage(url, page.id, img_idx)
-                  if local_path then
-                    -- Map original URL to EPUB-relative path
-                    local filename = local_path:match "([^/]+)$"
-                    image_mappings[url] = "images/" .. filename
+              if not blocks_success or not blocks_result.results then
+                -- A failed block fetch means the page's entire content is
+                -- unavailable. Writing a title-only EPUB and recording it as
+                -- synced would freeze that emptiness in place permanently, so
+                -- this counts as a failure and will be retried next sync.
+                logger.warn("NotionSync: Failed to get blocks for page", page.id,
+                  tostring(blocks_result))
+                total_failed = total_failed + 1
+                failed_titles[#failed_titles + 1] = title
+              else
+                local blocks = blocks_result.results
+                local build_ok, build_err, build_info = NotionEpub:build {
+                  title = title,
+                  author = database.name,
+                  date = page.last_edited_time,
+                  page_id = page.id,
+                  source = page.url,
+                  output_path = self.storage:getOutputPath(title, database.name),
+                  image_urls = NotionXhtml.collectImageURLs(blocks),
+                  fetch_image = function(url) return image_manager:fetch(url) end,
+                  render = function(image_map)
+                    local doc, render_ctx = NotionXhtml.renderPage {
+                      title = title,
+                      blocks = blocks,
+                      image_map = image_map,
+                    }
+                    -- The generated markup is otherwise sealed inside the EPUB,
+                    -- which makes a rendering complaint impossible to diagnose
+                    -- without unzipping a book off the device.
+                    if opts.dump_xhtml then
+                      self:writeDebugFile("notionsync-debug.xhtml", doc)
+                      self:writeDebugFile("notionsync-debug-blocks.txt",
+                        self:describeBlocks(blocks, image_map))
+                    end
+                    return doc, render_ctx
+                  end,
+                }
+
+                if build_info and build_info.render_ctx then
+                  for btype, count in pairs(build_info.render_ctx.unsupported or {}) do
+                    unsupported[btype] = (unsupported[btype] or 0) + count
                   end
                 end
 
-                local markdown = self.converter:pageToMarkdown(page, blocks_result.results)
-                local html_content = NotionEpub:markdownToHtml(title, markdown, image_mappings)
-                local save_success = self.storage:saveEpub(
-                  title,
-                  html_content,
-                  database.name,
-                  self.storage:getTempImageDir()
-                )
-
-                if save_success then
+                if build_ok then
+                  -- Only recorded after the archive was written AND verified.
                   self.storage:markAsSynced(sync_key)
                   synced_ids[sync_key] = true
                   total_new = total_new + 1
                 else
-                  logger.warn(string.format("NotionSync: Save failed for '%s'", title))
+                  logger.warn(string.format("NotionSync: build failed for '%s': %s",
+                    title, tostring(build_err)))
+                  total_failed = total_failed + 1
+                  failed_titles[#failed_titles + 1] = title
                 end
-              else
-                logger.warn("NotionSync: Failed to get blocks for page", page.id)
               end
             else
               total_old = total_old + 1

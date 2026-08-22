@@ -132,7 +132,27 @@ describe("paths", function()
             "/tmp/notion_sync/Reading_List")
     end)
 
-    it("temp_image_dir_is_hidden", function()
-        assert_contains(S:getTempImageDir(), ".notion_image_cache")
+    -- Images now stream straight into the archive from memory, so there is no
+    -- temp image directory any more -- which is what made every EPUB contain
+    -- every image downloaded so far in the sync.
+    it("no_temp_image_directory_exists", function()
+        assert_eq(S.getTempImageDir, nil)
+        assert_eq(S.cleanupTempImages, nil)
+    end)
+
+    it("output_path_is_database_dir_plus_epub_filename", function()
+        assert_eq(S:getOutputPath("My Page", "Reading List"),
+            "/tmp/notion_sync/Reading_List/My_Page.epub")
+    end)
+
+    it("output_path_always_ends_in_epub", function()
+        assert_match(S:getOutputPath("Anything", "DB"), "%.epub$")
+    end)
+
+    -- saveEpub used to dofile epub.lua on every single save, which also reloaded
+    -- the 1212-line Markdown parser each time. Writing is the builder's job now.
+    it("storage_no_longer_writes_epubs_itself", function()
+        assert_eq(S.saveEpub, nil)
+        assert_eq(S.saveMarkdown, nil)
     end)
 end)
