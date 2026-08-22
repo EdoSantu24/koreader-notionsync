@@ -163,6 +163,83 @@ describe("showSyncReport", function()
     end)
 end)
 
+describe("sync_entry", function()
+    local function instance(over)
+        local o = setmetatable({
+            selected_databases = { { id = "db", name = "DB" } },
+        }, { __index = Sync })
+        for k, v in pairs(over or {}) do o[k] = v end
+        return o
+    end
+
+    -- There are two entry points (the menu and the Dispatcher action) and a sync
+    -- can run for minutes. A second start would reset sync_alive, silently
+    -- un-cancelling the first, and both would write the same .part paths.
+    it("refuses_to_start_a_second_sync", function()
+        h.shown = {}
+        local s = instance { sync_running = true }
+        s:syncNow()
+        assert_eq(#h.shown, 1)
+        assert_contains(h.shown[1].text, "already running")
+    end)
+
+    it("still_refuses_with_no_databases_selected", function()
+        h.shown = {}
+        local s = instance { selected_databases = {} }
+        s:syncNow()
+        assert_contains(h.shown[1].text, "at least one database")
+    end)
+
+    -- The Dispatcher action registers event NotionSyncNow; with no handler a
+    -- gesture bound to it does nothing at all.
+    it("has_a_dispatcher_event_handler", function()
+        assert_eq(type(Sync.onNotionSyncNow), "function")
+    end)
+
+    it("the_handler_reports_it_consumed_the_event", function()
+        local s = instance { sync_running = true }
+        assert_true(s:onNotionSyncNow())
+    end)
+end)
+
+describe("runSync_teardown", function()
+    -- Trapper:wrap logs an error and returns WITHOUT clearing its widget, so an
+    -- error outside the per-page guard would leave a progress message on screen
+    -- forever, produce no report, and leave sync_running stuck true -- blocking
+    -- every later sync.
+    local function run_with_failing_loop()
+        h.shown = {}
+        local s = setmetatable({
+            selected_databases = {},
+            runSyncLoop = function() error("boom") end,
+        }, { __index = Sync })
+        s:runSync {}
+        return s
+    end
+
+    it("still_shows_a_report_when_the_loop_throws", function()
+        run_with_failing_loop()
+        assert_true(#h.shown > 0, "a report must be shown even on a fatal error")
+        assert_contains(h.shown[#h.shown].text, "Stopped by an error")
+    end)
+
+    it("clears_the_running_flag_so_the_next_sync_is_not_blocked", function()
+        local s = run_with_failing_loop()
+        assert_false(s.sync_running)
+    end)
+
+    it("counts_the_fatal_error_as_a_failure", function()
+        run_with_failing_loop()
+        local text = h.shown[#h.shown].text
+        assert_not_contains(text, "Sync complete!")
+    end)
+
+    it("keeps_the_report_on_screen_after_a_fatal_error", function()
+        run_with_failing_loop()
+        assert_eq(h.shown[#h.shown].timeout, nil)
+    end)
+end)
+
 describe("tick", function()
     local function fresh()
         h.Trapper.resetRecorder()

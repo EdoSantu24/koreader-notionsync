@@ -491,8 +491,27 @@ function NotionSync:tick(text, force)
   return self.sync_alive
 end
 
+-- The Dispatcher action registered in onDispatcherRegisterActions dispatches this
+-- event. Without a handler the registered action silently does nothing, so a
+-- gesture or profile bound to "Notion Sync Now" appears broken.
+function NotionSync:onNotionSyncNow()
+  self:syncNow()
+  return true
+end
+
 function NotionSync:syncNow(opts)
   opts = opts or {}
+
+  -- There are two entry points (the menu and the Dispatcher action), and a sync
+  -- can take minutes. Without this guard a second sync would reset sync_alive,
+  -- silently un-cancelling the first, and both would write the same .part paths.
+  if self.sync_running then
+    UIManager:show(InfoMessage:new {
+      text = _ "A sync is already running.",
+      timeout = 2,
+    })
+    return
+  end
 
   if #self.selected_databases == 0 then
     UIManager:show(InfoMessage:new {
@@ -534,6 +553,30 @@ function NotionSync:runSync(opts)
   }
 
   local image_manager = ImageManager:new()
+  self.sync_running = true
+
+  -- Teardown must happen even if the loop throws. The per-page pcall covers page
+  -- errors, but anything outside it -- a failed query, a formatting slip -- would
+  -- otherwise escape to Trapper:wrap, which logs the error and returns WITHOUT
+  -- clearing its widget. The result would be a progress message stuck on screen
+  -- forever, no report, and a sync_running flag that blocks every later sync.
+  local ok, err = pcall(function()
+    self:runSyncLoop(opts, stats, image_manager)
+  end)
+
+  self.sync_running = false
+  Trapper:reset()
+
+  if not ok then
+    logger.err("NotionSync: sync aborted by error:", tostring(err))
+    stats.failed = stats.failed + 1
+    stats.fatal = tostring(err)
+  end
+
+  self:showSyncReport(stats, image_manager)
+end
+
+function NotionSync:runSyncLoop(opts, stats, image_manager)
   self.api:resetRetryBudget()
   local synced_ids = self.storage:getSyncedIds()
 
@@ -605,9 +648,6 @@ function NotionSync:runSync(opts)
 
     if stats.cancelled then break end
   end
-
-  Trapper:reset()
-  self:showSyncReport(stats, image_manager)
 end
 
 function NotionSync:syncOnePage(ctx)
@@ -722,6 +762,12 @@ function NotionSync:showSyncReport(stats, image_manager)
   end
 
   lines[#lines + 1] = T(_ "New: %1   Unchanged: %2", stats.new, stats.unchanged)
+
+  -- An error that escaped the per-page guard aborted the run; say so rather than
+  -- letting the counts imply the sync simply finished early.
+  if stats.fatal then
+    lines[#lines + 1] = T(_ "Stopped by an error: %1", stats.fatal)
+  end
 
   if stats.failed > 0 then
     local names = {}

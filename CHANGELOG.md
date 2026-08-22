@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Notion Sync Now** is now usable as a gesture or profile action. The Dispatcher
+  action was registered but had no handler, so anything bound to it did nothing
+- Starting a sync while one is already running is now refused, rather than the
+  second run silently un-cancelling the first and both writing the same files
+
 - **A running sync can now be cancelled.** Tap the progress message and confirm;
   the sync stops at the next checkpoint without leaving a partial file behind.
   Checked between databases, between pages, during nested-block fetching, and
