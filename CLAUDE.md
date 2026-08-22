@@ -76,6 +76,30 @@ All progress and cancellation goes through `NotionSync:tick(text, force)`. It is
 
 **Progress text must keep a fixed shape.** `Trapper:info(text, fast_refresh)` with `fast_refresh` repaints only the *new* widget's rectangle, so a message that shrinks leaves ghost pixels on e-ink. `progressText` therefore always emits three lines with a padded, fixed-width title, and there is a test asserting the line count. Forced ticks (database boundaries) use a full refresh because the layout can change shape.
 
+### Pagination
+
+`api.collectAll(fetch, max_items)` walks every cursor page and is used for
+databases, pages and block children alike.
+
+Two rules in it are load-bearing. The cursor check is `type(cursor) == "string"`,
+**not** a truthiness test: KOReader's `rapidjson` decodes JSON `null` to a
+lightuserdata sentinel rather than `nil`, so `if res.next_cursor then` is *true*
+on the last page and spins until a cap stops it. And there is an absolute
+request backstop independent of any user setting, because a server that kept
+returning `has_more` with a fresh cursor would otherwise run until the battery
+died.
+
+`queryDatabase` sorts by **`created_time` ascending, not `last_edited_time`**.
+Sorting on a mutable field while paginating is unstable — a page edited between
+two cursor requests moves within the result set and is then skipped or returned
+twice. Change detection reads each page's own `last_edited_time` instead.
+
+If the API rejects the sort, `getAllPages` retries once without it rather than
+losing the whole database: the sort key is an assumption, and it should not be
+fatal. `/v1/search` gets no sort at all — its options are narrow and a wrong key
+is a 400 that would break the database picker, so the picker sorts by name
+client-side.
+
 ### Sync history
 
 `<save_dir>/.synced_ids` is an append-only newline-delimited file of keys shaped `<page_id>:epub`. A page is re-fetched if its key is absent *or* the expected output file is missing.
@@ -135,16 +159,6 @@ are load-bearing: structural containers (`table`, `column_list`, `column`,
 allowance on structure and arrives with no rows; and `child_page` is never
 recursed into, since that is a separate document and would pull in an unbounded
 subtree.
-
-**No pagination.** `searchDatabases` caps at 20 databases, `queryDatabase` at 20
-pages per database, `getBlockChildren` at 100 blocks per page, and no
-`next_cursor` is followed anywhere. No `sorts` is sent either, so *which* 20 pages
-sync is not stable between runs. When adding this, note that KOReader's
-`rapidjson` decodes JSON `null` to a lightuserdata sentinel, **not** `nil` — so
-`if res.next_cursor then` is truthy on the last page and loops forever. Test
-`type(cursor) == "string"`. Sort by `created_time` ascending, not
-`last_edited_time`: sorting by a mutable field while paginating lets pages
-reorder between cursor requests, which silently skips or duplicates them.
 
 **Edits in Notion never re-sync.** Sync state is keyed on page id alone, with no
 `last_edited_time` comparison, so a page fixed in Notion keeps its stale copy

@@ -72,6 +72,245 @@ describe("retry_budget", function()
     end)
 end)
 
+--------------------------------------------------------------------------------
+-- pagination
+--------------------------------------------------------------------------------
+
+-- Builds a fetch function returning the given cursor pages in order, recording
+-- the cursor it was called with each time.
+local function paged(pages)
+    local calls = {}
+    local n = 0
+    local fetch = function(cursor)
+        n = n + 1
+        calls[n] = cursor or false
+        local page = pages[math.min(n, #pages)]
+        if page.fail then return false, page.fail end
+        return true, page
+    end
+    return fetch, calls
+end
+
+local function items(count, offset)
+    local out = {}
+    for i = 1, count do out[i] = { id = "id" .. ((offset or 0) + i) } end
+    return out
+end
+
+describe("collectAll", function()
+    it("returns_a_single_page_unchanged", function()
+        local fetch = paged { { results = items(3), has_more = false } }
+        local ok, out, truncated = API.collectAll(fetch)
+        assert_true(ok)
+        assert_eq(#out, 3)
+        assert_false(truncated)
+    end)
+
+    it("follows_cursors_and_concatenates", function()
+        local fetch, calls = paged {
+            { results = items(2), has_more = true, next_cursor = "c1" },
+            { results = items(2, 2), has_more = true, next_cursor = "c2" },
+            { results = items(1, 4), has_more = false },
+        }
+        local ok, out = API.collectAll(fetch)
+        assert_true(ok)
+        assert_eq(#out, 5)
+        assert_eq(calls[1], false, "first call takes no cursor")
+        assert_eq(calls[2], "c1")
+        assert_eq(calls[3], "c2")
+    end)
+
+    -- THE trap: rapidjson decodes JSON null to a lightuserdata sentinel, not nil,
+    -- so a truthiness test on next_cursor is TRUE on the last page and spins until
+    -- a cap stops it.
+    it("stops_on_a_non_string_cursor", function()
+        local NULL = setmetatable({}, {})
+        local fetch, calls = paged {
+            { results = items(2), has_more = false, next_cursor = NULL },
+        }
+        local ok, out, truncated = API.collectAll(fetch)
+        assert_true(ok)
+        assert_eq(#out, 2)
+        assert_eq(#calls, 1, "a non-string cursor must end pagination")
+        assert_false(truncated)
+    end)
+
+    it("stops_when_has_more_is_false_despite_a_cursor", function()
+        local fetch, calls = paged {
+            { results = items(1), has_more = false, next_cursor = "c1" },
+        }
+        API.collectAll(fetch)
+        assert_eq(#calls, 1)
+    end)
+
+    it("stops_on_an_empty_string_cursor", function()
+        local fetch, calls = paged {
+            { results = items(1), has_more = true, next_cursor = "" },
+        }
+        API.collectAll(fetch)
+        assert_eq(#calls, 1)
+    end)
+
+    -- A server that kept returning has_more with a fresh cursor would otherwise
+    -- run until the battery died.
+    it("has_an_absolute_request_backstop", function()
+        local n = 0
+        local ok, out, truncated = API.collectAll(function()
+            n = n + 1
+            return true, { results = items(1), has_more = true, next_cursor = "always" .. n }
+        end)
+        assert_true(ok)
+        assert_eq(n, API.MAX_PAGINATION_REQUESTS)
+        assert_true(truncated, "hitting the backstop must be reported")
+        assert_true(#out > 0)
+    end)
+
+    it("respects_max_items_and_trims", function()
+        local fetch = paged {
+            { results = items(100), has_more = true, next_cursor = "c1" },
+            { results = items(100, 100), has_more = true, next_cursor = "c2" },
+        }
+        local ok, out, truncated = API.collectAll(fetch, 150)
+        assert_true(ok)
+        assert_eq(#out, 150)
+        assert_true(truncated)
+    end)
+
+    -- Reaching the cap exactly with nothing left is not truncation.
+    it("does_not_claim_truncation_when_the_data_simply_ended", function()
+        local fetch = paged { { results = items(50), has_more = false } }
+        local ok, out, truncated = API.collectAll(fetch, 50)
+        assert_true(ok)
+        assert_eq(#out, 50)
+        assert_false(truncated)
+    end)
+
+    it("treats_zero_max_items_as_unlimited", function()
+        local fetch = paged {
+            { results = items(10), has_more = true, next_cursor = "c1" },
+            { results = items(10, 10), has_more = false },
+        }
+        local ok, out = API.collectAll(fetch, 0)
+        assert_true(ok)
+        assert_eq(#out, 20)
+    end)
+
+    it("propagates_a_failure", function()
+        local fetch = paged { { fail = "unauthorized" } }
+        local ok, err = API.collectAll(fetch)
+        assert_false(ok)
+        assert_contains(err, "unauthorized")
+    end)
+
+    it("propagates_a_failure_on_a_later_cursor_page", function()
+        local fetch = paged {
+            { results = items(1), has_more = true, next_cursor = "c1" },
+            { fail = "HTTP 500" },
+        }
+        local ok, err = API.collectAll(fetch)
+        assert_false(ok)
+        assert_contains(err, "500")
+    end)
+
+    it("tolerates_a_page_with_no_results_field", function()
+        local fetch = paged { { has_more = false } }
+        local ok, out = API.collectAll(fetch)
+        assert_true(ok)
+        assert_eq(#out, 0)
+    end)
+end)
+
+describe("query_body", function()
+    local function capture_body(fn)
+        local api = API:new("token")
+        local seen
+        api.apiCall = function(_, _, _, body) seen = body return true, { results = {} } end
+        fn(api)
+        return seen
+    end
+
+    it("requests_the_api_maximum_page_size", function()
+        local body = capture_body(function(api) api:queryDatabase("db") end)
+        assert_eq(body.page_size, 100)
+    end)
+
+    -- created_time, not last_edited_time: sorting on a mutable field while
+    -- paginating lets a page edited mid-walk move between cursor pages and be
+    -- skipped or returned twice.
+    it("sorts_by_an_immutable_timestamp", function()
+        local body = capture_body(function(api) api:queryDatabase("db") end)
+        assert_eq(body.sorts[1].timestamp, "created_time")
+        assert_eq(body.sorts[1].direction, "ascending")
+    end)
+
+    it("can_omit_the_sort", function()
+        local body = capture_body(function(api)
+            api:queryDatabase("db", nil, { no_sort = true })
+        end)
+        assert_eq(body.sorts, nil)
+    end)
+
+    it("passes_a_string_cursor", function()
+        local body = capture_body(function(api) api:queryDatabase("db", "cur1") end)
+        assert_eq(body.start_cursor, "cur1")
+    end)
+
+    it("ignores_a_non_string_cursor", function()
+        local body = capture_body(function(api)
+            api:queryDatabase("db", setmetatable({}, {}))
+        end)
+        assert_eq(body.start_cursor, nil)
+    end)
+
+    -- /v1/search's sort options are narrow and a wrong key is a 400 that would
+    -- break the database picker outright, so no sort is sent.
+    it("search_sends_no_sort", function()
+        local body = capture_body(function(api) api:searchDatabases() end)
+        assert_eq(body.sort, nil)
+        assert_eq(body.sorts, nil)
+        assert_eq(body.page_size, 100)
+    end)
+end)
+
+describe("getAllPages_sort_fallback", function()
+    -- The sort key is an assumption about the API. A rejected sort must not cost
+    -- the entire database.
+    it("retries_without_sorts_when_the_query_fails", function()
+        local api = API:new("token")
+        local bodies = {}
+        api.apiCall = function(_, _, _, body)
+            bodies[#bodies + 1] = body
+            if body.sorts then return false, "sort is not valid" end
+            return true, { results = { { id = "p1" } }, has_more = false }
+        end
+
+        local ok, pages = api:getAllPages("db")
+        assert_true(ok, "a rejected sort must not fail the database")
+        assert_eq(#pages, 1)
+        assert_true(bodies[1].sorts ~= nil, "first attempt sorts")
+        assert_eq(bodies[2].sorts, nil, "retry omits the sort")
+    end)
+
+    it("reports_the_original_error_when_the_retry_also_fails", function()
+        local api = API:new("token")
+        api.apiCall = function() return false, "unauthorized" end
+        local ok, err = api:getAllPages("db")
+        assert_false(ok)
+        assert_contains(err, "unauthorized")
+    end)
+
+    it("does_not_retry_when_the_first_attempt_succeeds", function()
+        local api = API:new("token")
+        local calls = 0
+        api.apiCall = function()
+            calls = calls + 1
+            return true, { results = {}, has_more = false }
+        end
+        api:getAllPages("db")
+        assert_eq(calls, 1)
+    end)
+end)
+
 -- Notion splits a title into a separate rich-text object at every formatting or
 -- mention boundary, so reading only [1] truncated the title there.
 describe("titles", function()

@@ -130,24 +130,131 @@ function NotionAPI:requestOnce(method, endpoint, body)
     return code, sink
 end
 
-function NotionAPI:searchDatabases()
+-- 100 is the API maximum. The previous value of 20 was also a hard stop, because
+-- no cursor was ever followed: only the first 20 databases and the first 20 pages
+-- of each existed as far as the plugin was concerned.
+NotionAPI.PAGE_SIZE = 100
+
+-- Absolute backstop on one pagination walk, independent of any user setting. A
+-- server that kept returning has_more with a fresh cursor would otherwise loop
+-- until the device ran out of battery.
+NotionAPI.MAX_PAGINATION_REQUESTS = 50
+
+function NotionAPI:searchDatabases(start_cursor)
     local body = {
         filter = {
             property = "object",
             value = "database",
         },
-        page_size = 20,
+        page_size = self.PAGE_SIZE,
     }
-
+    if type(start_cursor) == "string" and start_cursor ~= "" then
+        body.start_cursor = start_cursor
+    end
+    -- Deliberately no sort. /v1/search takes `sort` (singular) with a restricted
+    -- set of timestamps, and getting that wrong is a 400 that would break the
+    -- database picker entirely. The picker sorts by name client-side instead,
+    -- which costs nothing and cannot fail.
     return self:apiCall("POST", "/v1/search", body)
 end
 
-function NotionAPI:queryDatabase(database_id, page_size)
+function NotionAPI:queryDatabase(database_id, start_cursor, opts)
+    opts = opts or {}
     local body = {
-        page_size = page_size or 20,
+        page_size = self.PAGE_SIZE,
     }
-
+    if type(start_cursor) == "string" and start_cursor ~= "" then
+        body.start_cursor = start_cursor
+    end
+    if not opts.no_sort then
+        -- created_time, NOT last_edited_time. Sorting on a mutable field while
+        -- paginating is unstable: a page edited between two cursor requests moves
+        -- within the result set and is then skipped or returned twice. Change
+        -- detection reads each page's own last_edited_time instead.
+        body.sorts = { { timestamp = "created_time", direction = "ascending" } }
+    end
     return self:apiCall("POST", "/v1/databases/" .. database_id .. "/query", body)
+end
+
+-- Walks every cursor page of a paginated endpoint.
+--
+-- fetch(cursor) -> ok, result
+-- Returns ok, items, truncated  (or false, error_message)
+--
+-- The cursor guard is `type(cursor) == "string"`, not a truthiness test, and that
+-- is the whole reason this is a shared function: KOReader's rapidjson decodes JSON
+-- `null` to a lightuserdata sentinel rather than nil, so `if res.next_cursor then`
+-- is TRUE on the last page and spins until a cap stops it.
+function NotionAPI.collectAll(fetch, max_items)
+    local out = {}
+    local cursor = nil
+    local requests = 0
+    local truncated = false
+
+    while true do
+        if requests >= NotionAPI.MAX_PAGINATION_REQUESTS then
+            logger.warn("NotionAPI: pagination hit the request backstop")
+            truncated = true
+            break
+        end
+        requests = requests + 1
+
+        local ok, res = fetch(cursor)
+        if not ok then return false, res end
+
+        for _, item in ipairs(res.results or {}) do
+            out[#out + 1] = item
+        end
+
+        local had_more = res.has_more == true
+
+        if max_items and max_items > 0 and #out >= max_items then
+            local trimmed = #out > max_items
+            for i = #out, max_items + 1, -1 do
+                out[i] = nil
+            end
+            truncated = trimmed or had_more
+            break
+        end
+
+        cursor = res.next_cursor
+        if type(cursor) ~= "string" or cursor == "" then cursor = nil end
+        if not had_more or not cursor then break end
+    end
+
+    return true, out, truncated
+end
+
+function NotionAPI:getAllDatabases(max_items)
+    return NotionAPI.collectAll(function(cursor)
+        return self:searchDatabases(cursor)
+    end, max_items)
+end
+
+-- max_items of nil or 0 means "no limit beyond the request backstop".
+function NotionAPI:getAllPages(database_id, max_items)
+    local ok, items, truncated = NotionAPI.collectAll(function(cursor)
+        return self:queryDatabase(database_id, cursor)
+    end, max_items)
+
+    if ok then return ok, items, truncated end
+
+    -- The sort key above is an assumption about the API, and a rejected sort would
+    -- otherwise cost the entire database. Retrying without it makes that
+    -- assumption non-fatal at the price of one extra request on failure; if the
+    -- retry also fails, the original error is what gets reported.
+    local first_error = items
+    logger.warn("NotionAPI: query failed, retrying without sorts:", tostring(first_error))
+
+    local retry_ok, retry_items, retry_truncated = NotionAPI.collectAll(function(cursor)
+        return self:queryDatabase(database_id, cursor, { no_sort = true })
+    end, max_items)
+
+    if retry_ok then
+        logger.warn("NotionAPI: the API rejected the sort; page order is now unstable")
+        return true, retry_items, retry_truncated
+    end
+    return false, first_error
 end
 
 function NotionAPI:getBlockChildren(block_id, start_cursor)
