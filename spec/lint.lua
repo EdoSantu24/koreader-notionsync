@@ -90,12 +90,32 @@ local base_opts = {
     unused_args = rc.unused_args,
 }
 
--- Per-file overrides from the `files` table in .luacheckrc, matched by prefix.
+-- Per-file overrides from the `files` table in .luacheckrc.
+--
+-- Luacheck treats these keys as GLOBS (?, *, ** and character classes). For a
+-- key containing no glob metacharacters -- which is all this project uses, e.g.
+-- "spec/" -- it falls back to fs.is_subpath(), i.e. directory containment, and
+-- plain prefix matching is equivalent to that.
+--
+-- Real glob matching lives in luacheck.globbing, which requires lfs, which is
+-- the dependency this whole driver exists to avoid. So rather than silently
+-- mismatching, a glob key is reported and skipped: CI runs the real luacheck and
+-- remains the authority.
+--
+-- Note this is NOT Lua-pattern matching. Globs and Lua patterns are different
+-- languages, so `filename:match(key)` would diverge from luacheck rather than
+-- align with it, and would error outright on a key containing `-` or `[`.
+local GLOB_CHARS = "[%*%?%[%]]"
+
 local function opts_for(filename)
     if type(rc.files) ~= "table" then return base_opts end
     local merged = nil
     for pattern, overrides in pairs(rc.files) do
-        if filename:sub(1, #pattern) == pattern then
+        if pattern:find(GLOB_CHARS) then
+            io.stderr:write(string.format(
+                "warning: files[%q] uses glob syntax, which this driver cannot "
+                .. "match; relying on CI for that override\n", pattern))
+        elseif filename:sub(1, #pattern) == pattern then
             merged = merged or {}
             for k, v in pairs(base_opts) do merged[k] = v end
             for k, v in pairs(overrides) do
