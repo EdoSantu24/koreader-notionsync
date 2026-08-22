@@ -21,13 +21,17 @@ jobs:
 
       # The plugin runs on LuaJIT (Lua 5.1 semantics) on the device. Linting under
       # Lua 5.4 would accept syntax and stdlib calls that fail on the e-reader.
+      # v13 or newer is required: v10 installed LuaJIT by downloading
+      # https://luajit.org/download/LuaJIT-<version>.tar.gz, and no
+      # LuaJIT-2.1.tar.gz exists there, so "luajit-2.1" 404s. From v13 the
+      # action clones the v2.1 branch of the official LuaJIT repo instead.
       - name: Setup LuaJIT
-        uses: leafo/gh-actions-lua@v10
+        uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "luajit-2.1"
 
       - name: Setup LuaRocks
-        uses: leafo/gh-actions-luarocks@v4
+        uses: leafo/gh-actions-luarocks@v6
 
       - name: Install luacheck
         run: luarocks install luacheck
@@ -42,8 +46,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # v13 or newer is required: v10 installed LuaJIT by downloading
+      # https://luajit.org/download/LuaJIT-<version>.tar.gz, and no
+      # LuaJIT-2.1.tar.gz exists there, so "luajit-2.1" 404s. From v13 the
+      # action clones the v2.1 branch of the official LuaJIT repo instead.
       - name: Setup LuaJIT
-        uses: leafo/gh-actions-lua@v10
+        uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "luajit-2.1"
 
