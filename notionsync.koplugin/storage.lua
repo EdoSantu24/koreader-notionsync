@@ -120,25 +120,6 @@ function NotionStorage:fileExists(title, extension, database_name)
     return false
 end
 
-function NotionStorage:saveMarkdown(title, content, database_name)
-    local filename = self:sanitizeFilename(title, ".md")
-
-    -- Ensure database directory exists and get path
-    local db_dir = self:ensureDatabaseDirectory(database_name)
-    local filepath = ffiUtil.joinPath(db_dir, filename)
-
-    local file = io.open(filepath, "w")
-    if file then
-        file:write(content)
-        file:close()
-        logger.info("NotionStorage: Saved", filepath)
-        return true, filepath
-    else
-        logger.warn("NotionStorage: Failed to save", filepath)
-        return false, nil
-    end
-end
-
 function NotionStorage:saveEpub(title, html_content, database_name, temp_image_dir)
     local filename = self:sanitizeFilename(title, ".epub")
 

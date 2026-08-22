@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The Markdown (.md) output format.** EPUB is now the only output. The format
+  setting and its menu are gone, along with `storage:saveMarkdown`. Markdown
+  output shared all of the EPUB path's block-coverage gaps and would have needed
+  a parallel rewrite; dropping it removes an entire duplicate code path
+
 ### Added
+
+- **Tools → Notion Sync → Clear sync history**, with a confirmation showing how
+  many pages will be forgotten. Previously the only way to force a re-sync was
+  the side effect of switching output format, so removing that format would
+  otherwise have removed the capability entirely
 
 - Dependency-free unit test suite (`luajit spec/run.lua`) with KOReader module
   stubs, runnable without luarocks or a C compiler

@@ -2,6 +2,7 @@ local Dispatcher = require "dispatcher"
 local InfoMessage = require "ui/widget/infomessage"
 local InputDialog = require "ui/widget/inputdialog"
 local ButtonDialog = require "ui/widget/buttondialog"
+local ConfirmBox = require "ui/widget/confirmbox"
 local PathChooser = require "ui/widget/pathchooser"
 local UIManager = require "ui/uimanager"
 local WidgetContainer = require "ui/widget/container/widgetcontainer"
@@ -32,7 +33,6 @@ function NotionSync:init()
 
   self.selected_databases = self.settings:readSetting "selected_databases" or {}
   self.save_dir = self.settings:readSetting "save_dir" or "/mnt/onboard/notion_sync"
-  self.output_format = self.settings:readSetting "output_format" or "epub" -- "defaulting to epub"
   self.api = NotionAPI:new(self.notion_token)
   self.converter = NotionConverter
   self.storage = NotionStorage:new(self.save_dir)
@@ -78,49 +78,11 @@ function NotionSync:addToMainMenu(menu_items)
         callback = function() self:showDatabaseSelector() end,
       },
       {
-        text_func = function()
-          if self.output_format == "epub" then
-            return _ "Output Format (EPUB)"
-          else
-            return _ "Output Format (Markdown)"
-          end
-        end,
-        sub_item_table = {
-          {
-            text = _ "Markdown (.md)",
-            checked_func = function() return self.output_format == "md" end,
-            callback = function()
-              if self.output_format ~= "md" then
-                self.output_format = "md"
-                self.settings:saveSetting("output_format", "md")
-                self.settings:flush()
-                -- Clear sync history when format changes
-                self.storage:clearSyncHistory()
-                UIManager:show(InfoMessage:new {
-                  text = _ "Format changed to Markdown. Sync history cleared.",
-                  timeout = 2,
-                })
-              end
-            end,
-          },
-          {
-            text = _ "EPUB (.epub)",
-            checked_func = function() return self.output_format == "epub" end,
-            callback = function()
-              if self.output_format ~= "epub" then
-                self.output_format = "epub"
-                self.settings:saveSetting("output_format", "epub")
-                self.settings:flush()
-                -- Clear sync history when format changes
-                self.storage:clearSyncHistory()
-                UIManager:show(InfoMessage:new {
-                  text = _ "Format changed to EPUB. Sync history cleared.",
-                  timeout = 2,
-                })
-              end
-            end,
-          },
-        },
+        -- Until now the only way to force a re-sync was the side effect of
+        -- switching output format, which cleared the history. With Markdown
+        -- output gone, this is the replacement for that capability.
+        text = _ "Clear sync history",
+        callback = function() self:confirmClearSyncHistory() end,
         separator = true,
       },
       {
@@ -174,6 +136,38 @@ function NotionSync:showTokenInput()
   }
   UIManager:show(input_dialog)
   input_dialog:onShowKeyboard()
+end
+
+function NotionSync:confirmClearSyncHistory()
+  local count = self.storage:countSyncedIds()
+  if count == 0 then
+    UIManager:show(InfoMessage:new {
+      text = _ "Sync history is already empty.",
+      timeout = 2,
+    })
+    return
+  end
+
+  UIManager:show(ConfirmBox:new {
+    text = T(
+      _ "Forget %1 synced page(s)?\n\nThe next sync will download them all again. Files already on the device are not deleted.",
+      count
+    ),
+    ok_text = _ "Clear",
+    ok_callback = function()
+      if self.storage:clearSyncHistory() then
+        UIManager:show(InfoMessage:new {
+          text = _ "Sync history cleared.",
+          timeout = 2,
+        })
+      else
+        UIManager:show(InfoMessage:new {
+          text = _ "Could not clear sync history.",
+          timeout = 3,
+        })
+      end
+    end,
+  })
 end
 
 function NotionSync:showSaveDirPicker()
@@ -359,23 +353,17 @@ function NotionSync:syncNow()
         -- Cleanup old temp images from previous sync
         self.storage:cleanupTempImages()
 
-        -- Create ImageManager for EPUB format
-        local image_manager = nil
-        if self.output_format == "epub" then
-          local temp_dir = self.storage:ensureTempImageDir()
-          image_manager = ImageManager:new(temp_dir)
-          logger.info "NotionSync: ImageManager initialized for EPUB format"
-        end
+        local temp_dir = self.storage:ensureTempImageDir()
+        local image_manager = ImageManager:new(temp_dir)
+        logger.info "NotionSync: ImageManager initialized"
 
         local total_new = 0
         local total_old = 0
         local total_databases = #self.selected_databases
-        local extension = self.output_format == "epub" and ".epub" or ".md"
+        local extension = ".epub"
         local synced_ids = self.storage:getSyncedIds()
 
         logger.info("NotionSync: Syncing", total_databases, "database(s)")
-        logger.info("NotionSync: Output format is", self.output_format)
-        logger.info("NotionSync: Extension is", extension)
 
         -- Process each database sequentially
         local function processDatabase(db_index)
@@ -391,21 +379,19 @@ function NotionSync:syncNow()
               string.format("Databases: %d", total_databases),
             }
 
-            if image_manager then
-              local img_stats = image_manager:getStats()
-              if img_stats.downloaded > 0 or img_stats.failed > 0 then
-                table.insert(
-                  result_lines,
-                  string.format(
-                    "Images: %d downloaded, %d cached, %d failed",
-                    img_stats.downloaded,
-                    img_stats.cached,
-                    img_stats.failed
-                  )
+            local img_stats = image_manager:getStats()
+            if img_stats.downloaded > 0 or img_stats.failed > 0 then
+              table.insert(
+                result_lines,
+                string.format(
+                  "Images: %d downloaded, %d cached, %d failed",
+                  img_stats.downloaded,
+                  img_stats.cached,
+                  img_stats.failed
                 )
-              end
-              image_manager:cleanup()
+              )
             end
+            image_manager:cleanup()
 
             UIManager:show(InfoMessage:new {
               text = table.concat(result_lines, "\n"),
@@ -476,7 +462,10 @@ function NotionSync:syncNow()
 
             local page = result.results[page_index]
             local title = self.api:getPageTitle(page)
-            local sync_key = page.id .. ":" .. self.output_format
+            -- The ":epub" suffix is retained so that pages already recorded by
+            -- an earlier version are still recognised as synced. Dropping it
+            -- would silently force a full re-download of every page.
+            local sync_key = page.id .. ":epub"
 
             -- Check file existence in this database's directory
             local file_exists = self.storage:fileExists(title, extension, database.name)
@@ -497,49 +486,34 @@ function NotionSync:syncNow()
             UIManager:show(progress_message)
             UIManager:forceRePaint()
 
-            -- Sync if: not marked as synced with current format OR file doesn't exist
+            -- Sync if: not already recorded as synced OR the file is missing
             local should_sync = not synced_ids[sync_key] or not file_exists
 
             if should_sync then
               local blocks_success, blocks_result = self.api:getBlockChildren(page.id)
               if blocks_success and blocks_result.results then
-                -- Extract image URLs BEFORE converting to markdown (for EPUB format only)
-                local image_urls = {}
-                if self.output_format == "epub" then
-                  image_urls = self.converter:extractImageURLs(blocks_result.results)
-                end
+                -- Image URLs must be collected before conversion, so the local
+                -- paths are known by the time the HTML is generated.
+                local image_urls = self.converter:extractImageURLs(blocks_result.results)
 
-                -- Download images if EPUB format and images found
                 local image_mappings = {}
-                if self.output_format == "epub" and #image_urls > 0 and image_manager then
-                  for img_idx, url in ipairs(image_urls) do
-                    local local_path = image_manager:downloadImage(url, page.id, img_idx)
-                    if local_path then
-                      -- Map original URL to EPUB-relative path
-                      local filename = local_path:match "([^/]+)$"
-                      image_mappings[url] = "images/" .. filename
-                    end
+                for img_idx, url in ipairs(image_urls) do
+                  local local_path = image_manager:downloadImage(url, page.id, img_idx)
+                  if local_path then
+                    -- Map original URL to EPUB-relative path
+                    local filename = local_path:match "([^/]+)$"
+                    image_mappings[url] = "images/" .. filename
                   end
                 end
 
                 local markdown = self.converter:pageToMarkdown(page, blocks_result.results)
-                local save_success
-
-                if self.output_format == "epub" then
-                  local html_content = NotionEpub:markdownToHtml(
-                    title,
-                    markdown,
-                    image_mappings
-                  )
-                  save_success = self.storage:saveEpub(
-                    title,
-                    html_content,
-                    database.name,
-                    self.storage:getTempImageDir()
-                  )
-                else
-                  save_success = self.storage:saveMarkdown(title, markdown, database.name)
-                end
+                local html_content = NotionEpub:markdownToHtml(title, markdown, image_mappings)
+                local save_success = self.storage:saveEpub(
+                  title,
+                  html_content,
+                  database.name,
+                  self.storage:getTempImageDir()
+                )
 
                 if save_success then
                   self.storage:markAsSynced(sync_key)

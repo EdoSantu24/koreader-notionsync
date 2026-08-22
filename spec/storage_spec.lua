@@ -72,6 +72,58 @@ describe("sanitizeDatabaseName", function()
     end)
 end)
 
+-- countSyncedIds was dead code until the "Clear sync history" menu item started
+-- reporting how many pages would be forgotten. The history file is append-only
+-- and legitimately contains repeated ids, so de-duplication is the real contract.
+describe("syncHistory", function()
+    local tmpdir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
+    tmpdir = tmpdir:gsub("\\", "/")
+
+    -- sync_dir points straight at the temp directory: the stubbed lfs.mkdir only
+    -- records intent, so a subdirectory would never actually exist on disk.
+    local function storage_with_history(lines)
+        local s = Storage:new(tmpdir)
+        local f = assert(io.open(s.synced_ids_file, "w"))
+        f:write(lines)
+        f:close()
+        return s
+    end
+
+    it("counts_unique_ids", function()
+        local s = storage_with_history("aaa:epub\nbbb:epub\nccc:epub\n")
+        assert_eq(s:countSyncedIds(), 3)
+    end)
+
+    it("deduplicates_repeated_appends", function()
+        local s = storage_with_history("aaa:epub\naaa:epub\naaa:epub\nbbb:epub\n")
+        assert_eq(s:countSyncedIds(), 2, "append-only file must collapse duplicates")
+    end)
+
+    it("ignores_blank_lines_and_whitespace", function()
+        local s = storage_with_history("aaa:epub\n\n  bbb:epub  \n\n")
+        assert_eq(s:countSyncedIds(), 2)
+    end)
+
+    it("reports_zero_for_missing_file", function()
+        local s = Storage:new(tmpdir .. "/definitely_does_not_exist_" .. tostring(os.time()))
+        assert_eq(s:countSyncedIds(), 0)
+    end)
+
+    it("clearSyncHistory_empties_it", function()
+        local s = storage_with_history("aaa:epub\nbbb:epub\n")
+        assert_true(s:clearSyncHistory())
+        assert_eq(s:countSyncedIds(), 0)
+    end)
+
+    it("getSyncedIds_returns_a_set_keyed_by_id", function()
+        local s = storage_with_history("aaa:epub\nbbb:epub\n")
+        local set = s:getSyncedIds()
+        assert_true(set["aaa:epub"])
+        assert_true(set["bbb:epub"])
+        assert_eq(set["ccc:epub"], nil)
+    end)
+end)
+
 describe("paths", function()
     it("database_directory_is_under_sync_dir", function()
         assert_eq(S:getDatabaseDirectory("Reading List"),
