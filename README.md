@@ -72,18 +72,43 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 **Note:** The deployment script is for development only. End users should install from releases. I have also only tested on kobo
 but this should work on other devices.
 
-#### 1. Set Up Environment Variable
+#### 0. Which deployment script do I need?
 
-The deployment script requires you to set the path to your mounted device.
+It depends on how your device presents itself over USB:
+
+| Your device shows up as | Use |
+| --- | --- |
+| A drive letter / mounted volume (`D:`, `/Volumes/Kindle`, `/media/...`) | `./deploy.sh` |
+| `This PC\<device>\Internal Storage` with **no** drive letter | `./deploy-mtp.ps1` (Windows) |
+
+**Newer Kindles — Colorsoft, Scribe, recent Paperwhites — use MTP** and never get
+a drive letter. `deploy.sh` cannot reach them at all, because it copies with `cp`
+to a filesystem path and MTP does not provide one. Use the PowerShell script:
+
+```powershell
+# From the repository root, in PowerShell:
+.\deploy-mtp.ps1 -Backup          # -Backup saves the installed copy first
+.\deploy-mtp.ps1 -WhatIf          # dry run, touches nothing
+```
+
+It finds the device, verifies every copied file's byte size, and tells you if a
+copy silently failed (which MTP does if the device falls asleep mid-transfer).
+Older mass-storage Kindles and all Kobos can use `deploy.sh` below.
+
+#### 1. Set Up Environment Variable (`deploy.sh` only)
+
+The deployment script requires you to set the path to your mounted device. It
+detects whether KOReader is installed in the Kobo layout (`<mount>/.adds/koreader`)
+or the Kindle layout (`<mount>/koreader`), so the same variable works for both.
 
 **Bash/Zsh:**
 
 ```bash
 # For current session:
-export KOBO_MOUNT_PATH="/path/to/your/kobo"
+export DEVICE_MOUNT_PATH="/path/to/your/ereader"
 
 # Permanent (add to ~/.bashrc or ~/.zshrc):
-echo 'export KOBO_MOUNT_PATH="/path/to/your/kobo"' >> ~/.bashrc
+echo 'export DEVICE_MOUNT_PATH="/path/to/your/ereader"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -91,17 +116,20 @@ source ~/.bashrc
 
 ```fish
 # For current session:
-set -x KOBO_MOUNT_PATH "/path/to/your/kobo"
+set -x DEVICE_MOUNT_PATH "/path/to/your/ereader"
 
 # Permanent (add to ~/.config/fish/config.fish):
-echo 'set -x KOBO_MOUNT_PATH "/path/to/your/kobo"' >> ~/.config/fish/config.fish
+echo 'set -x DEVICE_MOUNT_PATH "/path/to/your/ereader"' >> ~/.config/fish/config.fish
 ```
 
 **Common paths:**
 
-- **Linux:** `/run/media/$USER/KOBOeReader`
-- **macOS:** `/Volumes/KOBOeReader`
-- **Windows (WSL):** `/mnt/d/KOBOeReader`
+| Device | Linux | macOS | Windows (Git Bash / WSL) |
+| --- | --- | --- | --- |
+| Kindle | `/run/media/$USER/Kindle` | `/Volumes/Kindle` | `/d` or `/mnt/d` |
+| Kobo | `/run/media/$USER/KOBOeReader` | `/Volumes/KOBOeReader` | `/d` or `/mnt/d` |
+
+`KOBO_MOUNT_PATH` is still accepted as a legacy alias.
 
 #### 2. Deploy to Device
 
@@ -121,19 +149,42 @@ echo 'set -x KOBO_MOUNT_PATH "/path/to/your/kobo"' >> ~/.config/fish/config.fish
 
 ### Testing
 
+The plugin itself cannot run off-device, so the unit tests are the only feedback
+you get without deploying. They cover the pure logic (block conversion, filename
+sanitisation, HTML generation) and need **nothing but a LuaJIT binary** — no
+luarocks, no C compiler.
+
 ```bash
-luarocks install luacheck
-luacheck notionsync.koplugin/
+# Install LuaJIT 2.1, the same runtime KOReader uses.
+#   Windows:  winget install DEVCOM.LuaJIT
+#   macOS:    brew install luajit
+#   Debian:   sudo apt install luajit
+
+luajit spec/run.lua        # run the test suite
 ```
+
+Linting is optional locally and enforced in CI. If you want it locally, note that
+the `luacheck` CLI needs luafilesystem (a C module), so on a machine without a
+compiler install only the pure-Lua parts and use the bundled driver:
+
+```bash
+luarocks --lua-version 5.1 --lua-dir <luajit-dir> install --deps-mode=none luacheck
+export LUA_PATH="$HOME/.luarocks/share/lua/5.1/?.lua;$HOME/.luarocks/share/lua/5.1/?/init.lua;;"
+
+luajit spec/lint.lua       # reads the same .luacheckrc as CI
+```
+
+On Windows, `LUA_PATH` must use a native path (`C:/Users/you/...`), not an MSYS
+`/c/...` path.
 
 ### Development Workflow
 
-1. Make your changes to the plugin code
-2. Test locally using `./deploy.sh`
-3. Ensure code passes linting: `luacheck notionsync.koplugin/`
-4. Update `CHANGELOG.md` with your changes
-5. Commit and push to `main` (CI will lint and create dev build)
-6. Submit a pull request
+1. Branch off an up-to-date `main` — never commit to `main` directly
+2. Make your changes to the plugin code
+3. Run the tests: `luajit spec/run.lua`
+4. Deploy to your device and verify: `./deploy.sh`
+5. Update `CHANGELOG.md` under `## [Unreleased]`
+6. Push the branch and open a pull request (CI runs lint + tests on PRs)
 
 ### Creating a Release
 
@@ -165,11 +216,21 @@ See [RELEASE.md](RELEASE.md) for detailed instructions on creating releases.
 3. Verify your device has internet access during sync
 4. Check the sync completion message for failed image downloads
 
-### "KOBO_MOUNT_PATH is not set" Error (Developers)
+### "DEVICE_MOUNT_PATH is not set" Error (Developers)
 
 This error only affects developers using the deployment script. End users should install from releases and won't encounter this error.
 
 Make sure you've set the environment variable correctly for your shell. See the [Development](#development) section.
+
+### "KOReader plugins directory not found" (Developers)
+
+`deploy.sh` looks for both supported layouts and prints which paths it tried:
+
+- Kobo: `<mount>/.adds/koreader/plugins`
+- Kindle: `<mount>/koreader/plugins`
+
+If neither exists, either KOReader is not installed on the device or
+`DEVICE_MOUNT_PATH` points at the wrong volume.
 
 ## Requirements
 

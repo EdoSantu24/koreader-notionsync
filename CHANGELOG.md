@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Dependency-free unit test suite (`luajit spec/run.lua`) with KOReader module
+  stubs, runnable without luarocks or a C compiler
+- Local luacheck driver (`luajit spec/lint.lua`) that reads the same
+  `.luacheckrc` as CI, for machines where luafilesystem cannot be built
+- CI now runs on pull requests, and in a separate test job, so branch work is
+  actually checked
+- `CLAUDE.md` with architecture notes and platform gotchas
+
+- `deploy-mtp.ps1`, a PowerShell deployment script for MTP devices. Newer Kindles
+  (Colorsoft, Scribe, recent Paperwhites) expose storage over MTP and never get a
+  drive letter, so `deploy.sh` cannot reach them at all. Verifies every copied
+  file's size, supports `-Backup` and `-WhatIf`
+
+### Changed
+
+- `deploy.sh` now supports Kindle as well as Kobo, detecting whether KOReader
+  lives at `<mount>/koreader` or `<mount>/.adds/koreader`, and points at
+  `deploy-mtp.ps1` when no drive letter is available
+- `deploy.sh` environment variable renamed to `DEVICE_MOUNT_PATH`
+  (`KOBO_MOUNT_PATH` still accepted)
+- Linting now runs against LuaJIT (`std = "luajit"`) instead of the permissive
+  `std = "max"`, so use of Lua 5.2+/5.3+ stdlib functions that would fail on the
+  device is now caught. CI installs LuaJIT rather than Lua 5.4 for the same reason
+- Undefined-global and unused-argument checks are no longer suppressed, as these
+  are the highest-value checks for code that cannot be executed off-device
+
+### Fixed
+
+- Discarded unused HTTP response values in `api.lua` and `imagemanager.lua` that
+  were masking the response headers needed to determine image content types
+
 ## [1.0.0] - 2026-01-25
 
 ### Added

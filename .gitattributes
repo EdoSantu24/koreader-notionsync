@@ -1,0 +1,15 @@
+# Store every text file with LF in the repository, regardless of a contributor's
+# local core.autocrlf setting.
+#
+# This is preventive rather than a fix: the repo is currently LF-clean. But
+# deploy.sh in particular MUST be LF -- a shell script committed with CRLF fails
+# on Linux and macOS with `$'\r': command not found`, and a contributor whose
+# core.autocrlf is unset would introduce exactly that without noticing.
+* text=auto eol=lf
+
+# Binary-ish artefacts: never touch line endings.
+*.tar.gz binary
+*.zip binary
+*.epub binary
+*.png binary
+*.jpg binary
