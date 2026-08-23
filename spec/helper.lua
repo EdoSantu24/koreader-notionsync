@@ -394,15 +394,35 @@ M.socketutil = socketutil
 
 M.shown = {}
 
-local function widget_stub()
+-- `extra` adds methods that only *some* widgets really have -- see WIDGET_EXTRAS
+-- below. Applied only where the key is absent, so a caller passing its own
+-- implementation still wins.
+local function widget_stub(extra)
     return {
         new = function(_, opts)
             local w = opts or {}
             w.is_stub_widget = true
+            for k, v in pairs(extra or {}) do
+                if w[k] == nil then w[k] = v end
+            end
             return w
         end,
     }
 end
+
+-- Per-widget methods, NOT shared across every stub. Only InputDialog has the
+-- keyboard methods upstream; giving them to InfoMessage and friends would make
+-- the stub advertise an API the real widget lacks, which is the same mistake as
+-- the getUtf8CharSize stub noted above -- code written against it passes every
+-- test here and then fails on the device. A stub must not be more generous than
+-- reality; it must also not be less capable, or the code path cannot be reached
+-- at all (showTokenInput calls onShowKeyboard immediately after constructing).
+local WIDGET_EXTRAS = {
+    ["ui/widget/inputdialog"] = {
+        onShowKeyboard = function() end,
+        onCloseKeyboard = function() end,
+    },
+}
 
 local UIManager = {
     show = function(_, widget) M.shown[#M.shown + 1] = widget end,
@@ -490,7 +510,7 @@ for _, widget in ipairs({
     "ui/widget/infomessage", "ui/widget/inputdialog", "ui/widget/buttondialog",
     "ui/widget/confirmbox", "ui/widget/pathchooser",
 }) do
-    package.preload[widget] = function() return widget_stub() end
+    package.preload[widget] = function() return widget_stub(WIDGET_EXTRAS[widget]) end
 end
 package.preload["util"] = function() return util end
 package.preload["libs/libkoreader-lfs"] = function() return lfs end

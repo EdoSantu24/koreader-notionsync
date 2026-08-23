@@ -91,6 +91,45 @@ describe("defaultSaveDir", function()
     end)
 end)
 
+-- The Notion integration token is an account credential with read access to every
+-- database shared with the integration. This dialog used to render it in clear on a
+-- screen that gets read over people's shoulders.
+describe("showTokenInput", function()
+    local function open(token)
+        h.shown = {}
+        local s = setmetatable({ notion_token = token }, { __index = Sync })
+        s:showTokenInput()
+        return h.shown[#h.shown]
+    end
+
+    it("masks_the_token_field", function()
+        assert_eq(open("secret_abc123").text_type, "password")
+    end)
+
+    -- Masking must not make an existing token unrecoverable: it stays pre-filled
+    -- so it need not be retyped, and InputText adds its own "Show password"
+    -- toggle so the value can still be checked deliberately.
+    it("still_prefills_the_existing_token", function()
+        assert_eq(open("secret_abc123").input, "secret_abc123")
+    end)
+
+    -- Asserts both actions are reachable, not that there are exactly two
+    -- buttons: adding a third would be a valid change and must not fail here.
+    it("still_offers_cancel_and_save", function()
+        local labels = {}
+        for _, row in ipairs(open("t").buttons or {}) do
+            for _, b in ipairs(row) do labels[#labels + 1] = b.text end
+        end
+        local joined = table.concat(labels, ",")
+        assert_contains(joined, "Save")
+        assert_contains(joined, "Cancel")
+    end)
+
+    it("opens_with_no_token_set", function()
+        assert_eq(open(nil).text_type, "password")
+    end)
+end)
+
 describe("progressText", function()
     -- The invariant fast_refresh depends on.
     it("always_produces_three_lines", function()
