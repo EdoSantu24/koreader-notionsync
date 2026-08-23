@@ -23,7 +23,7 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 
 ## Prerequisites
 
-- An eReader with KOReader installed (tested on Kobo, should work on other devices)
+- An eReader with KOReader installed (developed and tested on a Kindle Colorsoft; Kobo is supported but untested)
 - A Notion account with API access
 - Notion Integration set up with appropriate permissions
 
@@ -32,12 +32,23 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 1. Go to the [Releases](../../releases) page
 2. Download the latest `notionsync.koplugin-X.X.X.tar.gz`
 3. Connect your eReader to your computer
-4. Extract the plugin to your KOReader plugins directory:
+4. Extract the plugin into your KOReader plugins directory. **The path differs by
+   device — `.adds` is Kobo-only:**
+
    ```bash
-   tar -xzf notionsync.koplugin-X.X.X.tar.gz -C /path/to/ereader/.adds/koreader/plugins/
+   # Kindle
+   tar -xzf notionsync.koplugin-X.X.X.tar.gz -C /path/to/device/koreader/plugins/
+
+   # Kobo
+   tar -xzf notionsync.koplugin-X.X.X.tar.gz -C /path/to/device/.adds/koreader/plugins/
    ```
+
+   Newer Kindles (Colorsoft, Scribe, recent Paperwhites) connect over MTP and get
+   no drive letter, so there is no path to extract to directly. Extract locally
+   first, then copy the `notionsync.koplugin` folder onto the device in your file
+   manager.
 5. Eject your eReader safely
-6. Restart KOReader
+6. **Fully restart KOReader** — plugins are only loaded at startup
 
 ## Configuration
 
@@ -82,8 +93,9 @@ alone and will be overwritten on the next sync.
 
 ### Setting Up Development Environment
 
-**Note:** The deployment script is for development only. End users should install from releases. I have also only tested on kobo
-but this should work on other devices.
+**Note:** The deployment scripts are for development only — end users should
+install from releases. Development and testing happen on a Kindle Colorsoft; the
+Kobo paths are implemented but untested.
 
 #### 0. Which deployment script do I need?
 
@@ -101,6 +113,7 @@ to a filesystem path and MTP does not provide one. Use the PowerShell script:
 ```powershell
 # From the repository root, in PowerShell:
 .\deploy-mtp.ps1 -Backup          # -Backup saves the installed copy first
+.\deploy-mtp.ps1 -Prune           # also move files no longer in the source tree off
 .\deploy-mtp.ps1 -WhatIf          # dry run, touches nothing
 ```
 
@@ -208,12 +221,15 @@ See [RELEASE.md](RELEASE.md) for detailed instructions on creating releases.
 ### Plugin Not Appearing in KOReader
 
 1. Verify KOReader is properly installed on your device
-2. Check that the plugin files are in the correct location:
+2. Check that the plugin files are in the correct location for your device:
    ```
-   /path/to/device/.adds/koreader/plugins/notionsync.koplugin/
+   /path/to/device/koreader/plugins/notionsync.koplugin/         # Kindle
+   /path/to/device/.adds/koreader/plugins/notionsync.koplugin/   # Kobo
    ```
 3. Ensure all `.lua` files are present in the plugin directory
-4. Restart KOReader
+4. Fully restart KOReader — plugins are only loaded at startup, and a plugin with
+   a Lua error does not appear in the menu rather than reporting anything. Errors
+   are written to `<koreader>/crash.log` on the device
 
 ### Sync Errors
 

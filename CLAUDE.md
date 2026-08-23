@@ -30,7 +30,9 @@ Requires LuaJIT 2.1 (`winget install DEVCOM.LuaJIT` on Windows). For local linti
 
 Newer Kindles — **Colorsoft, Scribe, recent Paperwhites — use MTP** and never get a drive letter. `deploy.sh` cannot reach them, because it copies with `cp` to a filesystem path and MTP provides none. `deploy-mtp.ps1` goes through the Windows shell COM interface, which is the only way to write to MTP without third-party software.
 
-MTP misbehaves in two specific ways the script compensates for, so preserve this if you touch it: it will not overwrite a file in place (hence delete-then-copy per file), and it silently drops transfers when the device sleeps (hence every copy is verified by byte size rather than assumed). `-WhatIf` dry-runs; `-Backup` pulls the installed copy to `~/notionsync-backup-<timestamp>` first.
+Two MTP quirks the script compensates for, worth preserving if you touch it. Transfers are silently dropped when the device sleeps, so every copy is verified afterwards — by byte size, falling back to an MD5 comparison when the new file happens to be the same length (the modification time is not reliably advanced for identical bytes, which once made deploying an unchanged file report as a failure). And **nothing may call `InvokeVerb`**: it is modal and raises a confirmation a non-interactive session cannot answer, which used to hang the script. Overwriting in place works, and `MoveHere` is the way to remove a file.
+
+`-WhatIf` dry-runs; `-Backup` pulls the installed copy to `~/notionsync-backup-<timestamp>` first; `-Prune` moves files no longer in the source tree off the device to `~/notionsync-removed-<timestamp>` (opt-in, because the plugin directory belongs to the user).
 
 `deploy.sh` auto-detects `<mount>/koreader` (Kindle) vs `<mount>/.adds/koreader` (Kobo). Its variable is `DEVICE_MOUNT_PATH`, with `KOBO_MOUNT_PATH` kept as a legacy alias. In Git Bash a drive is `/d`, not `/mnt/d` (that's WSL).
 

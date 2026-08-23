@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # The plugin runs on LuaJIT (Lua 5.1 semantics) on the device. Linting under
       # Lua 5.4 would accept syntax and stdlib calls that fail on the e-reader.
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # v13 or newer is required: v10 installed LuaJIT by downloading
       # https://luajit.org/download/LuaJIT-<version>.tar.gz, and no
@@ -76,7 +76,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Extract version from tag or use commit SHA
         id: get_version
@@ -95,7 +95,7 @@ jobs:
           cp -r notionsync.koplugin artifact-staging/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}
           path: artifact-staging/
@@ -121,7 +121,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.get_version.outputs.IS_TAG == 'true'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz
           body: |
@@ -130,11 +130,21 @@ jobs:
             ## Installation
 
             1. Download `notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz`
-            2. Extract to your KOReader plugins directory:
+            2. Extract into your KOReader plugins directory. The path depends on
+               your device, and `.adds` is Kobo-only:
+
                ```bash
+               # Kindle (Colorsoft, Scribe, Paperwhite, ...)
+               tar -xzf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz -C /path/to/device/koreader/plugins/
+
+               # Kobo
                tar -xzf notionsync.koplugin-${{ steps.get_version.outputs.VERSION }}.tar.gz -C /path/to/device/.adds/koreader/plugins/
                ```
-            3. Eject your device and restart KOReader
+
+               Newer Kindles connect over MTP and have no drive letter, so extract
+               locally first and copy the `notionsync.koplugin` folder across in
+               your file manager.
+            3. Eject your device and fully restart KOReader (plugins load only at startup)
 
             Alternatively, download the artifact zip from this workflow run and extract the `notionsync.koplugin` folder directly to your plugins directory.
 
@@ -144,7 +154,7 @@ jobs:
 
             ---
 
-            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.ref_name }}
+            **Full Changelog**: https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}
           draft: false
           prerelease: false
         env:
