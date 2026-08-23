@@ -94,10 +94,19 @@ Every push to `main` creates a development build:
 
 ### Installing Development Builds
 
+The plugins directory differs by device; `.adds` is Kobo-only.
+
 ```bash
-# Extract to your Kobo's plugins directory
-tar -xzf notionsync.koplugin-dev-a1b2c3d.tar.gz -C /path/to/kobo/.adds/koreader/plugins/
+# Kindle
+tar -xzf notionsync.koplugin-dev-a1b2c3d.tar.gz -C /path/to/device/koreader/plugins/
+
+# Kobo
+tar -xzf notionsync.koplugin-dev-a1b2c3d.tar.gz -C /path/to/device/.adds/koreader/plugins/
 ```
+
+For development, prefer the deploy scripts over extracting by hand — `deploy.sh`
+for a device with a drive letter, `deploy-mtp.ps1` for an MTP Kindle. See the
+README's Development section.
 
 ## Version Numbering
 

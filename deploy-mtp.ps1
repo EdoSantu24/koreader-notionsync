@@ -31,6 +31,12 @@
 .PARAMETER Backup
     Copy the currently installed plugin off the device before overwriting it.
 
+.PARAMETER Prune
+    Move files that no longer exist in the source tree off the device, into
+    ~/notionsync-removed-<timestamp>. Opt-in on purpose: the plugin directory
+    belongs to the user, and silently removing anything unrecognised there would
+    be the wrong default.
+
 .PARAMETER WhatIf
     Show what would happen without writing to the device.
 
@@ -44,7 +50,8 @@
 param(
     [string]$DeviceName = 'Kindle*',
     [string]$KoreaderPath = 'koreader',
-    [switch]$Backup
+    [switch]$Backup,
+    [switch]$Prune
 )
 
 $ErrorActionPreference = 'Stop'
@@ -288,10 +295,17 @@ foreach ($file in $sourceFiles) {
     }
 }
 
-# Files on the device that no longer exist in the source tree. These are NOT
-# removed automatically: deleting over MTP needs InvokeVerb('delete'), which is
-# what used to hang this script. They are inert (main.lua only loads the modules
-# it names), so reporting them is enough.
+# Files on the device that no longer exist in the source tree.
+#
+# Reported by default and only removed with -Prune, because the plugin directory
+# belongs to the user and silently deleting anything unrecognised there would be
+# the wrong default. They are inert regardless: main.lua only loads the modules it
+# names by dofile, and KOReader does not auto-load stray .lua files.
+#
+# Removal uses MoveHere, NOT InvokeVerb('delete'). The verb is modal and raises a
+# confirmation a non-interactive session cannot answer, which is what used to hang
+# this script; MoveHere is asynchronous like CopyHere and leaves the file locally
+# as a backup. Verified working against a Kindle Colorsoft.
 $sourceNames = @{}
 foreach ($f in $sourceFiles) { $sourceNames[$f.BaseName] = $true }
 $stale = @()
@@ -302,14 +316,45 @@ foreach ($item in $existing.GetFolder.Items()) {
 }
 if ($stale.Count -gt 0) {
     Write-Host ""
-    Write-Warn2 "Stale file(s) left over from an older version: $($stale -join ', ')"
-    Write-Warn2 "They are unused and harmless. Delete them in File Explorer if you want."
+    if (-not $Prune) {
+        Write-Warn2 "Stale file(s) left over from an older version: $($stale -join ', ')"
+        Write-Warn2 "They are unused and harmless. Re-run with -Prune to move them off."
+    } elseif ($PSCmdlet.ShouldProcess(($stale -join ', '), 'Move stale files off the device')) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $removedDir = Join-Path $env:USERPROFILE "notionsync-removed-$stamp"
+        New-Item -ItemType Directory -Path $removedDir -Force | Out-Null
+
+        foreach ($name in $stale) {
+            $item = Get-ShellChild $existing $name
+            if ($item) { $shell.NameSpace($removedDir).MoveHere($item, $COPY_FLAGS) }
+        }
+
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadline) {
+            $left = @($stale | Where-Object { Get-ShellChild $existing $_ })
+            if ($left.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 400
+        }
+
+        $left = @($stale | Where-Object { Get-ShellChild $existing $_ })
+        if ($left.Count -gt 0) {
+            Write-Fail "Could not remove: $($left -join ', ')"
+            # Folded into the exit status below: printing a failure while exiting 0
+            # would let a scripted deploy read this as success.
+            $pruneFailed = $true
+        } else {
+            Write-Ok "Moved $($stale.Count) stale file(s) to $removedDir"
+        }
+    }
 }
 
 Write-Host ""
-if ($failed.Count -gt 0) {
-    Write-Fail "$copied copied, $($failed.Count) failed: $($failed -join ', ')"
-    Write-Warn2 "MTP copies can fail if the device sleeps. Wake it and re-run."
+if ($failed.Count -gt 0 -or $pruneFailed) {
+    if ($failed.Count -gt 0) {
+        Write-Fail "$copied copied, $($failed.Count) failed: $($failed -join ', ')"
+        # Scoped to copy failures: this hint does not apply to a failed prune.
+        Write-Warn2 "MTP copies can fail if the device sleeps. Wake it and re-run."
+    }
     exit 1
 }
 
