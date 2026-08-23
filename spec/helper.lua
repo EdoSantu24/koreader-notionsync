@@ -58,16 +58,24 @@ M.logger = logger
 -- util: the handful of helpers the plugin actually uses
 --------------------------------------------------------------------------------
 
+-- Forward declaration: util.pathExists below is defined in terms of lfs, which is
+-- built further down. Without this the name would resolve to a nil global.
+local lfs
+
 local util = {}
 
+-- Mirrors frontend/util.lua: both of these are defined in terms of lfs, not
+-- io.open. io.open on a directory succeeds on Linux and fails on Windows, so a
+-- stub built on it would behave differently per platform.
 function util.pathExists(path)
-    local f = io.open(path, "r")
-    if f then f:close() return true end
-    return false
+    return lfs.attributes(path, "mode") ~= nil
 end
 
+-- The real one is recursive and returns truthy on success, or nil plus a message.
+-- Note `err` can be nil even on failure, so callers must not assume a message.
 function util.makePath(path)
     M.made_paths[#M.made_paths + 1] = path
+    M.fake_fs[path] = "directory"
     return true
 end
 
@@ -104,7 +112,7 @@ M.made_paths = {}
 
 M.fake_fs = {}
 
-local lfs = {}
+lfs = {}
 
 function lfs.attributes(path, what)
     local mode = M.fake_fs[path]

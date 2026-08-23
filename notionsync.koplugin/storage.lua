@@ -1,4 +1,3 @@
-local lfs = require("libs/libkoreader-lfs")
 local ffiUtil = require("ffi/util")
 local util = require("util")
 local LuaSettings = require("luasettings")
@@ -250,14 +249,25 @@ function NotionStorage:countSyncedPages()
     return count
 end
 
+-- Creates a directory and any missing parents. Returns ok, err.
+--
+-- This used to try lfs.mkdir (not recursive, so it failed whenever a parent was
+-- missing) and then fall back to os.execute("mkdir -p " .. path). That shell call
+-- was unquoted, so any save directory containing a space created two wrong
+-- directories instead of one -- and its result was discarded, so the failure was
+-- invisible. util.makePath is recursive, involves no shell, and reports failure.
 function NotionStorage:ensureDirectory(path)
-    local mode = lfs.attributes(path, "mode")
-    if not mode then
-        local success = lfs.mkdir(path)
-        if not success then
-            os.execute("mkdir -p " .. path)
-        end
+    if util.pathExists(path) then return true end
+
+    local ok, err = util.makePath(path)
+    if not ok then
+        -- Reported rather than swallowed: everything downstream of this writes
+        -- files, and "could not create the directory" is the single most useful
+        -- thing to know when nothing appears on the device.
+        logger.warn("NotionStorage: could not create directory", path, tostring(err))
+        return false, err
     end
+    return true
 end
 
 function NotionStorage:initialize()

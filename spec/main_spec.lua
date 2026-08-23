@@ -40,6 +40,30 @@ end
 
 --------------------------------------------------------------------------------
 
+-- The old default was the literal Kobo path "/mnt/onboard/notion_sync", which
+-- does not exist on a Kindle. Directory creation then fell through to
+-- `mkdir -p` and, on a writable rootfs, succeeded -- putting the library
+-- somewhere invisible over USB and liable to be wiped by a firmware update.
+describe("defaultSaveDir", function()
+    it("is_derived_from_the_device_home_directory", function()
+        -- The stub device reports no home_dir, so this exercises the fallback.
+        local dir = Sync.defaultSaveDir()
+        assert_true(type(dir) == "string" and dir ~= "")
+        assert_match(dir, "notion_sync$")
+    end)
+
+    it("is_never_the_hardcoded_kobo_path", function()
+        assert_not_contains(Sync.defaultSaveDir(), "/mnt/onboard")
+    end)
+
+    it("falls_back_to_the_koreader_data_dir_when_there_is_no_home", function()
+        -- generic/device.lua sets home_dir = nil, which is what a desktop build
+        -- looks like; the path must still be absolute and usable.
+        local dir = Sync.defaultSaveDir()
+        assert_match(dir, "^/")
+    end)
+end)
+
 describe("progressText", function()
     -- The invariant fast_refresh depends on.
     it("always_produces_three_lines", function()

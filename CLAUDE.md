@@ -139,7 +139,7 @@ without writing to flash on every page.
 ### On-device layout
 
 ```
-<save_dir>/                        # default /mnt/onboard/notion_sync (Kobo-specific)
+<save_dir>/                        # default <Device.home_dir>/notion_sync
   .synced_ids
   <Sanitized_Database_Name>/<Sanitized_Page_Title>.epub
 ```
@@ -147,6 +147,8 @@ without writing to flash on every page.
 An EPUB is built at `<name>.epub.part` and renamed into place only after the
 archive verifies, so the library can never contain a truncated book. A stray
 `.part` file means a sync died mid-write; it is safe to delete.
+
+The default is derived from `Device.home_dir` (`/mnt/us` on Kindle, `/mnt/onboard` on Kobo, `nil` on desktop, where it falls back to `DataStorage:getFullDataDir()`). It used to be the literal Kobo path, which on a Kindle does not exist -- directory creation then fell through to a shell `mkdir -p` which, on a writable rootfs, *succeeded*, putting the library somewhere invisible over USB. Only the default changed; an explicitly chosen directory is never overridden.
 
 Settings live elsewhere — `DataStorage:getSettingsDir()/notionsync.lua` via `LuaSettings`, not in `save_dir`.
 
