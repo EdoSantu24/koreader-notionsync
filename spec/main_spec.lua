@@ -113,13 +113,16 @@ describe("showTokenInput", function()
         assert_eq(open("secret_abc123").input, "secret_abc123")
     end)
 
+    -- Asserts both actions are reachable, not that there are exactly two
+    -- buttons: adding a third would be a valid change and must not fail here.
     it("still_offers_cancel_and_save", function()
         local labels = {}
         for _, row in ipairs(open("t").buttons or {}) do
             for _, b in ipairs(row) do labels[#labels + 1] = b.text end
         end
-        assert_eq(#labels, 2, "the dialog must still have both buttons")
-        assert_contains(table.concat(labels, ","), "Save")
+        local joined = table.concat(labels, ",")
+        assert_contains(joined, "Save")
+        assert_contains(joined, "Cancel")
     end)
 
     it("opens_with_no_token_set", function()
