@@ -339,6 +339,9 @@ if ($stale.Count -gt 0) {
         $left = @($stale | Where-Object { Get-ShellChild $existing $_ })
         if ($left.Count -gt 0) {
             Write-Fail "Could not remove: $($left -join ', ')"
+            # Folded into the exit status below: printing a failure while exiting 0
+            # would let a scripted deploy read this as success.
+            $pruneFailed = $true
         } else {
             Write-Ok "Moved $($stale.Count) stale file(s) to $removedDir"
         }
@@ -346,9 +349,12 @@ if ($stale.Count -gt 0) {
 }
 
 Write-Host ""
-if ($failed.Count -gt 0) {
-    Write-Fail "$copied copied, $($failed.Count) failed: $($failed -join ', ')"
-    Write-Warn2 "MTP copies can fail if the device sleeps. Wake it and re-run."
+if ($failed.Count -gt 0 -or $pruneFailed) {
+    if ($failed.Count -gt 0) {
+        Write-Fail "$copied copied, $($failed.Count) failed: $($failed -join ', ')"
+        # Scoped to copy failures: this hint does not apply to a failed prune.
+        Write-Warn2 "MTP copies can fail if the device sleeps. Wake it and re-run."
+    }
     exit 1
 }
 

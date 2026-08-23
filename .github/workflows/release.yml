@@ -111,13 +111,39 @@ jobs:
         if: steps.get_version.outputs.IS_TAG == 'true'
         id: changelog
         run: |
-          if [ -f CHANGELOG.md ]; then
-            echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-            sed -n "/^## \[${{ steps.get_version.outputs.VERSION }}\]/,/^## \[/p" CHANGELOG.md | sed '$d' >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "CHANGELOG=Release ${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::error::CHANGELOG.md is missing, so the release would have no notes."
+            exit 1
           fi
+
+          # awk rather than `sed -n '/start/,/end/p' | sed '$d'`: that form deletes
+          # the last line of the range, which silently ate a real content line
+          # whenever the section ran to end-of-file with no following heading.
+          BODY=$(awk -v want="## [$VERSION]" '
+            index($0, want) == 1 { found = 1; next }
+            found && /^## \[/    { exit }
+            found                { print }
+          ' CHANGELOG.md)
+
+          # A heading that does not match the tag produced an EMPTY release body
+          # and published anyway. Failing here is loud and recoverable: fix the
+          # changelog, delete the tag, push it again.
+          if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
+            echo "::error::No changelog entries found under '## [$VERSION]'."
+            echo "::error::The heading must match the tag version exactly."
+            echo "Headings present in CHANGELOG.md:"
+            grep -n '^## \[' CHANGELOG.md || true
+            exit 1
+          fi
+
+          {
+            echo "CHANGELOG<<CHANGELOG_EOF"
+            printf '%s
+' "$BODY"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         if: steps.get_version.outputs.IS_TAG == 'true'

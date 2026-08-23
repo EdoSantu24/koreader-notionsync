@@ -102,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Releasing with a `CHANGELOG.md` heading that does not match the tag now **fails
+  loudly instead of publishing a release with empty notes**. The extraction also no
+  longer drops the last line of a section that runs to end-of-file
 - The **Full Changelog** link in published releases pointed at
   `github.event.before`, which is all zeros on a tag push, so every release shipped
   a broken compare link
