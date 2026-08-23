@@ -399,6 +399,13 @@ local function widget_stub()
         new = function(_, opts)
             local w = opts or {}
             w.is_stub_widget = true
+            -- Real widgets answer these, and code under test calls them right
+            -- after constructing a dialog. Defaulted rather than assigned so a
+            -- caller passing its own implementation still wins. A stub must not
+            -- be *more* generous than reality, but it must not be less capable
+            -- either, or a test cannot reach the code path at all.
+            w.onShowKeyboard = w.onShowKeyboard or function() end
+            w.onCloseKeyboard = w.onCloseKeyboard or function() end
             return w
         end,
     }

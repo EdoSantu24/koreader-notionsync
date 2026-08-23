@@ -218,6 +218,12 @@ function NotionSync:showTokenInput()
     title = _ "Enter Notion Integration Token",
     input = self.notion_token,
     input_type = "string",
+    -- The token is an account credential with read access to every database
+    -- shared with the integration, and this dialog used to render it in clear on
+    -- a screen that gets read over people's shoulders. Masking costs nothing in
+    -- verifiability: InputText adds a "Show password" toggle to password fields
+    -- automatically, so the value can still be checked deliberately.
+    text_type = "password",
     buttons = {
       {
         {

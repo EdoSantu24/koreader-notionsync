@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Notion token is no longer displayed in clear text when you open **Set Notion
+  Token**. It is an account credential with read access to every database shared
+  with the integration, and it was rendered in full on a screen that tends to be
+  read over people's shoulders. The field is masked now, with KOReader's own
+  *Show password* toggle to reveal it deliberately; an existing token stays
+  pre-filled so it does not have to be retyped.
+
 ## [2.0.0] - 2026-08-23
 
 A rebuild of the EPUB pipeline. Synced books previously arrived with no images, no
