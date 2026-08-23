@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read over people's shoulders. The field is masked now, with KOReader's own
   *Show password* toggle to reveal it deliberately; an existing token stays
   pre-filled so it does not have to be retyped.
+- A rate-limit backoff no longer freezes the device. The retry delay was a single
+  blocking `socket.sleep`, which stopped KOReader's event loop for its whole
+  duration: nothing repainted and a tap to cancel was never seen, so on e-ink a
+  retrying sync was indistinguishable from a hang. The wait is now sliced into
+  0.25s chunks with a cancellation check between them, so a sync can be stopped
+  while it is waiting to retry.
+- Cancelling during a retry wait now abandons the retry rather than only ending
+  the wait, so a cancelled sync no longer spends another request.
+
+### Changed
+
+- The total retry backoff ceiling rose from 20s to 60s per sync. The old value
+  was low because the sleep could not be interrupted, so it doubled as a limit on
+  how long the device could be frozen with no escape; now that the wait is
+  cancellable the cap only bounds total slowness, and a rate-limited sync is more
+  likely to finish a page than give up on it.
 
 ## [2.0.0] - 2026-08-23
 

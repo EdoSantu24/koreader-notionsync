@@ -51,9 +51,12 @@ describe("isRetryable", function()
 end)
 
 describe("retry_budget", function()
-    -- socket.sleep blocks KOReader's event loop and there is no way to cancel a
-    -- running sync, so the total backoff has to be bounded. Without the cap, a
-    -- rate-limited page could sleep 40 requests x 3s and freeze the device.
+    -- The backoff still has to be bounded, or a rate-limited sync runs for an
+    -- unbounded time. But the ceiling used to be about something stricter: the
+    -- sleep was one blocking socket.sleep with no way to cancel it, so the cap
+    -- doubled as a limit on how long the device could be frozen. Now that
+    -- waitFor slices the wait and honours should_abort, the cap only governs
+    -- total slowness, which is why it is allowed to be much larger.
     it("is_reset_per_sync", function()
         local api = API:new("token")
         api.retry_sleep_spent = 15
@@ -61,14 +64,135 @@ describe("retry_budget", function()
         assert_eq(api.retry_sleep_spent, 0)
     end)
 
-    it("has_a_ceiling_low_enough_to_stay_usable", function()
-        assert_true(API.MAX_TOTAL_RETRY_SLEEP <= 30,
-            "a blocking sleep budget above ~30s is not acceptable with no cancel")
+    it("has_a_ceiling", function()
         assert_true(API.MAX_TOTAL_RETRY_SLEEP > 0)
+        assert_true(API.MAX_TOTAL_RETRY_SLEEP <= 120,
+            "an unbounded backoff makes a rate-limited sync run forever")
     end)
 
     it("attempts_are_bounded", function()
         assert_true(API.MAX_ATTEMPTS >= 2 and API.MAX_ATTEMPTS <= 4)
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- interruptible backoff
+--------------------------------------------------------------------------------
+
+-- These pin the reason the sleep is sliced at all. A single socket.sleep(delay)
+-- blocks KOReader's event loop for the whole delay, so nothing repaints and
+-- Trapper never sees a dismiss tap -- on e-ink, indistinguishable from a hang.
+-- The helper's socket.sleep stub accumulates into h.slept, so the slicing is
+-- directly observable.
+describe("waitFor", function()
+    local function fresh()
+        h.slept = 0
+        h.slices = nil
+        return API:new("token")
+    end
+
+    it("sleeps_the_whole_delay_when_nothing_aborts", function()
+        local api = fresh()
+        assert_true(api:waitFor(1))
+        assert_eq(h.slept, 1)
+    end)
+
+    it("sleeps_in_slices_rather_than_one_blocking_call", function()
+        local api = fresh()
+        local calls = 0
+        local real_sleep = h.socket.sleep
+        h.socket.sleep = function(s) calls = calls + 1; return real_sleep(s) end
+        api:waitFor(1)
+        h.socket.sleep = real_sleep
+        assert_eq(calls, 4, "1s at a 0.25s slice should be four sleeps, not one")
+        assert_eq(h.slept, 1, "slicing must not change the total slept")
+    end)
+
+    -- The whole point: a cancel part-way through must cut the wait short.
+    it("stops_early_when_should_abort_fires", function()
+        local api = fresh()
+        api.should_abort = function() return h.slept >= 0.5 end
+        assert_false(api:waitFor(10))
+        assert_true(h.slept <= 0.75,
+            "should have abandoned the wait near 0.5s, slept " .. tostring(h.slept))
+    end)
+
+    it("returns_false_without_sleeping_at_all_if_already_cancelled", function()
+        local api = fresh()
+        api.should_abort = function() return true end
+        assert_false(api:waitFor(10))
+        assert_eq(h.slept, 0)
+    end)
+
+    -- A cancel landing during the last slice must not be answered with another
+    -- attempt, so the hook is consulted once more on the way out.
+    it("rechecks_after_the_final_slice", function()
+        local api = fresh()
+        api.should_abort = function() return h.slept >= 0.25 end
+        assert_false(api:waitFor(0.25))
+    end)
+
+    -- Paths with no sync running (the database picker) leave the hook unset.
+    it("is_safe_with_no_abort_hook", function()
+        local api = fresh()
+        assert_true(api:waitFor(0.5))
+        assert_eq(h.slept, 0.5)
+    end)
+
+    -- 0.25 is a power of two so the subtraction is exact; a slice like 0.3 would
+    -- leave a sliver of remaining time and one extra sleep.
+    it("does_not_accumulate_float_drift", function()
+        local api = fresh()
+        api:waitFor(3)
+        assert_eq(h.slept, 3)
+    end)
+
+    it("treats_a_nil_delay_as_no_wait", function()
+        local api = fresh()
+        assert_true(api:waitFor(nil))
+        assert_eq(h.slept, 0)
+    end)
+end)
+
+-- waitFor and the abort hook are each correct in isolation; what actually
+-- matters is that apiCall acts on the result. A cancelled wait has to ABANDON
+-- the retry, not merely stop waiting for it -- a cancelled sync should not go on
+-- to spend another request.
+describe("apiCall_cancellation", function()
+    -- requestOnce needs ssl.https, so it is replaced on the instance. Assigning
+    -- the field shadows the metatable method, which is what apiCall resolves.
+    local function always_rate_limited()
+        local api = API:new("token")
+        local attempts = 0
+        api.requestOnce = function() attempts = attempts + 1; return 429, {} end
+        api:resetRetryBudget()
+        h.slept = 0
+        return api, function() return attempts end
+    end
+
+    it("stops_retrying_when_cancelled_mid_wait", function()
+        local api, attempts = always_rate_limited()
+        api.should_abort = function() return h.slept >= 0.5 end
+        api:apiCall("GET", "/v1/x")
+        assert_eq(attempts(), 1,
+            "a cancelled wait must not be followed by another request")
+    end)
+
+    it("stops_immediately_when_already_cancelled", function()
+        local api, attempts = always_rate_limited()
+        api.should_abort = function() return true end
+        api:apiCall("GET", "/v1/x")
+        assert_eq(attempts(), 1)
+        assert_eq(h.slept, 0)
+    end)
+
+    -- The converse: absent cancellation the retry policy is unchanged, so this
+    -- fix cannot have quietly cost us the retries themselves.
+    it("still_uses_every_attempt_when_not_cancelled", function()
+        local api, attempts = always_rate_limited()
+        api:apiCall("GET", "/v1/x")
+        assert_eq(attempts(), API.MAX_ATTEMPTS)
+        assert_true(h.slept > 0, "backoff should still actually wait")
     end)
 end)
 

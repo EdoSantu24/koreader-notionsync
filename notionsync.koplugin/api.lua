@@ -25,12 +25,22 @@ end
 -- easily and a bare failure would silently cost a table or a whole subtree.
 NotionAPI.MAX_ATTEMPTS = 3
 
--- socket.sleep BLOCKS KOReader's event loop, and there is currently no way to
--- cancel a running sync. Without a ceiling, a rate-limited page could retry 40
--- requests x 3s of backoff and freeze the device for minutes with no escape, so
--- total sleep is capped per sync. Once spent, requests still happen -- they just
--- stop waiting between attempts.
-NotionAPI.MAX_TOTAL_RETRY_SLEEP = 20
+-- Backoff is sliced and cancellable (see waitFor), so this ceiling now exists
+-- only to stop a rate-limited sync running unboundedly long. It used to exist to
+-- bound how long the device could be frozen with no escape, which is why it was
+-- set as low as 20s; waiting is now merely slow, and the user can stop it at any
+-- point. Once spent, requests still happen -- they just stop waiting between
+-- attempts.
+NotionAPI.MAX_TOTAL_RETRY_SLEEP = 60
+
+-- socket.sleep blocks KOReader's event loop for its entire duration: nothing
+-- repaints, and Trapper never sees a dismiss tap, which on e-ink is
+-- indistinguishable from a hang. Sleeping in slices and calling back between
+-- them keeps both alive. 0.25s is short enough to feel responsive and long
+-- enough that the callback -- a time-throttled repaint -- is not run wastefully.
+-- A power of two, so subtracting it from an integer delay cannot accumulate
+-- floating-point drift and leave the loop one slice short.
+NotionAPI.SLEEP_SLICE = 0.25
 
 -- Whether a failure is worth another attempt. Exposed rather than local so the
 -- retry policy is testable: it governs every network call the plugin makes, and
@@ -45,6 +55,27 @@ end
 -- per plugin session.
 function NotionAPI:resetRetryBudget()
     self.retry_sleep_spent = 0
+end
+
+-- Sleeps for `seconds` in SLEEP_SLICE chunks, consulting should_abort between
+-- them. Returns false if the wait was cut short, so the caller can abandon the
+-- retry rather than merely stop waiting for it -- a cancelled sync should not
+-- spend another request.
+--
+-- should_abort is optional by design. Paths with no sync in progress (the
+-- database picker) leave it unset and sleep uninterrupted, exactly as before.
+function NotionAPI:waitFor(seconds)
+    local remaining = seconds or 0
+    while remaining > 0 do
+        if self.should_abort and self.should_abort() then return false end
+        local slice = remaining
+        if slice > self.SLEEP_SLICE then slice = self.SLEEP_SLICE end
+        socket.sleep(slice)
+        remaining = remaining - slice
+    end
+    -- Checked once more on the way out, so a cancel arriving during the final
+    -- slice is not answered with another attempt.
+    return not (self.should_abort and self.should_abort())
 end
 
 -- Note on retrying POSTs: /v1/search and /v1/databases/{id}/query are POST by
@@ -64,9 +95,12 @@ function NotionAPI:apiCall(method, endpoint, body)
                 logger.warn("NotionAPI:", tostring(code), "on", endpoint,
                     "-- retrying in", delay, "s")
                 -- Notion's Retry-After is deliberately not honoured: it can be
-                -- tens of seconds, and blocking an e-reader that long is worse
-                -- than reporting the failure. Logged so it is at least visible.
-                socket.sleep(delay)
+                -- tens of seconds, and making an e-reader wait that long is
+                -- worse than reporting the failure. Logged so it stays visible.
+                if not self:waitFor(delay) then
+                    logger.info("NotionAPI: cancelled while waiting to retry")
+                    break
+                end
             else
                 logger.warn("NotionAPI:", tostring(code), "on", endpoint,
                     "-- retry sleep budget spent, retrying immediately")

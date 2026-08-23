@@ -570,6 +570,11 @@ end
 -- -- the right trade against repainting e-ink on every request.
 function NotionSync:tick(text, force)
   if not self.sync_alive then return false end
+  -- Remembered so a retry wait can repaint the *same* three lines. Progress text
+  -- must keep a fixed shape -- fast_refresh repaints only the new widget's
+  -- rectangle, so a shorter message leaves ghost pixels -- and re-rendering what
+  -- is already on screen is the one update guaranteed not to change shape.
+  self.last_tick_text = text
   local now = os.time()
   if force or not self.last_tick or now - self.last_tick >= 1 then
     self.last_tick = now
@@ -660,6 +665,15 @@ function NotionSync:runSync(opts)
 
   self.sync_running = false
   Trapper:reset()
+  -- Cleared here rather than at the end of runSyncLoop, because this teardown is
+  -- the one that runs even when the loop throws. Left set, the stale closure
+  -- would see sync_alive false from the finished sync and abort the *next*
+  -- network call the plugin made -- the database picker, with no sync running.
+  --
+  -- Guarded because this block has to survive a sync that died before the api
+  -- existed. The whole point of the teardown is to run when things went wrong,
+  -- so it must not be the thing that throws.
+  if self.api then self.api.should_abort = nil end
 
   if not ok then
     logger.err("NotionSync: sync aborted by error:", tostring(err))
@@ -675,6 +689,18 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
 
   self.sync_alive = true
   self.last_tick = nil
+  self.last_tick_text = nil
+
+  -- A blocking backoff froze the progress widget and swallowed the dismiss tap,
+  -- so api.lua slices its sleep and asks this between slices. Routed through
+  -- tick rather than reading sync_alive directly because Trapper:info is BOTH
+  -- the repaint and the dismiss check -- reading the flag alone would keep the
+  -- sync interruptible in principle while never noticing the interruption.
+  -- Before the first tick there is no text to repaint, so fall back to the flag.
+  self.api.should_abort = function()
+    if not self.last_tick_text then return not self.sync_alive end
+    return not self:tick(self.last_tick_text, false)
+  end
 
   local db_count = #self.selected_databases
   if opts.max_databases and opts.max_databases < db_count then
