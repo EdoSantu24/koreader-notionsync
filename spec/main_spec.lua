@@ -45,22 +45,49 @@ end
 -- `mkdir -p` and, on a writable rootfs, succeeded -- putting the library
 -- somewhere invisible over USB and liable to be wiped by a firmware update.
 describe("defaultSaveDir", function()
-    it("is_derived_from_the_device_home_directory", function()
-        -- The stub device reports no home_dir, so this exercises the fallback.
-        local dir = Sync.defaultSaveDir()
-        assert_true(type(dir) == "string" and dir ~= "")
-        assert_match(dir, "notion_sync$")
+    local original = h.device.home_dir
+    local function with_home(value, fn)
+        h.device.home_dir = value
+        local ok, err = pcall(fn)
+        h.device.home_dir = original
+        if not ok then error(err, 0) end
+    end
+
+    -- The branch every real user takes, and the reason this change exists.
+    it("uses_the_kindle_home_directory", function()
+        with_home("/mnt/us", function()
+            assert_eq(Sync.defaultSaveDir(), "/mnt/us/notion_sync")
+        end)
     end)
 
-    it("is_never_the_hardcoded_kobo_path", function()
-        assert_not_contains(Sync.defaultSaveDir(), "/mnt/onboard")
+    it("uses_the_kobo_home_directory", function()
+        with_home("/mnt/onboard", function()
+            assert_eq(Sync.defaultSaveDir(), "/mnt/onboard/notion_sync")
+        end)
     end)
 
-    it("falls_back_to_the_koreader_data_dir_when_there_is_no_home", function()
-        -- generic/device.lua sets home_dir = nil, which is what a desktop build
-        -- looks like; the path must still be absolute and usable.
-        local dir = Sync.defaultSaveDir()
-        assert_match(dir, "^/")
+    -- generic/device.lua sets home_dir = nil, which is what a desktop build looks
+    -- like. The path must still be absolute and usable.
+    it("falls_back_when_the_device_reports_no_home", function()
+        with_home(nil, function()
+            local dir = Sync.defaultSaveDir()
+            assert_match(dir, "^/")
+            assert_match(dir, "notion_sync$")
+        end)
+    end)
+
+    it("falls_back_on_an_empty_home", function()
+        with_home("", function()
+            assert_match(Sync.defaultSaveDir(), "notion_sync$")
+        end)
+    end)
+
+    -- The bug: a Kobo path baked in regardless of the device it runs on.
+    it("is_not_hardcoded_to_one_platform", function()
+        local kindle, kobo
+        with_home("/mnt/us", function() kindle = Sync.defaultSaveDir() end)
+        with_home("/mnt/onboard", function() kobo = Sync.defaultSaveDir() end)
+        assert_true(kindle ~= kobo, "the default must follow the device")
     end)
 end)
 

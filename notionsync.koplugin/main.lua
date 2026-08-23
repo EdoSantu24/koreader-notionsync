@@ -9,6 +9,7 @@ local WidgetContainer = require "ui/widget/container/widgetcontainer"
 local NetworkMgr = require "ui/network/manager"
 local Trapper = require "ui/trapper"
 local DataStorage = require "datastorage"
+local Device = require "device"
 local LuaSettings = require "luasettings"
 local logger = require "logger"
 local util = require "util"
@@ -41,8 +42,7 @@ local NotionSync = WidgetContainer:extend {
 -- and nil on desktop builds -- hence the fall back to KOReader's own data
 -- directory, which is what the bundled newsdownloader plugin does.
 function NotionSync.defaultSaveDir()
-  local ok, Device = pcall(require, "device")
-  if ok and Device and type(Device.home_dir) == "string" and Device.home_dir ~= "" then
+  if type(Device.home_dir) == "string" and Device.home_dir ~= "" then
     return Device.home_dir .. "/notion_sync"
   end
   return DataStorage:getFullDataDir() .. "/notion_sync"

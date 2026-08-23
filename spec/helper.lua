@@ -105,6 +105,11 @@ end
 M.util = util
 M.made_paths = {}
 
+-- Device.home_dir is /mnt/us on Kindle, /mnt/onboard on Kobo, and nil on generic
+-- desktop builds. Defaults to the Kindle value because that is the target device;
+-- tests set M.device.home_dir directly to exercise the other branches.
+M.device = { home_dir = "/mnt/us" }
+
 --------------------------------------------------------------------------------
 -- lfs: no real luafilesystem available locally, so this is a programmable fake.
 -- Tests set M.fake_fs = { ["/some/path"] = "directory", ... } as needed.
@@ -458,6 +463,7 @@ local LuaSettings = {
 --------------------------------------------------------------------------------
 
 package.preload["logger"] = function() return logger end
+package.preload["device"] = function() return M.device end
 package.preload["ltn12"] = function() return ltn12 end
 package.preload["socket"] = function() return socket end
 package.preload["socket.http"] = function() return http end

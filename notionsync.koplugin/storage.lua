@@ -261,9 +261,10 @@ function NotionStorage:ensureDirectory(path)
 
     local ok, err = util.makePath(path)
     if not ok then
-        -- Reported rather than swallowed: everything downstream of this writes
-        -- files, and "could not create the directory" is the single most useful
-        -- thing to know when nothing appears on the device.
+        -- Logged with the reason, because everything downstream of this writes
+        -- files and "could not create the directory" is the most useful thing to
+        -- know when nothing appears on the device. The user still sees a failure:
+        -- the EPUB build then cannot open its output and reports that page.
         logger.warn("NotionStorage: could not create directory", path, tostring(err))
         return false, err
     end
