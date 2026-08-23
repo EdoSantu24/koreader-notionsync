@@ -217,55 +217,191 @@ describe("sanitizeDatabaseName", function()
     end)
 end)
 
--- countSyncedIds was dead code until the "Clear sync history" menu item started
--- reporting how many pages would be forgotten. The history file is append-only
--- and legitimately contains repeated ids, so de-duplication is the real contract.
-describe("syncHistory", function()
-    local tmpdir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
-    tmpdir = tmpdir:gsub("\\", "/")
+-- Sync state: the point of this is that editing a page in Notion actually
+-- re-downloads it, which it never used to.
+describe("syncState", function()
+    local tmpdir = (os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"):gsub("\\", "/")
 
-    -- sync_dir points straight at the temp directory: the stubbed lfs.mkdir only
-    -- records intent, so a subdirectory would never actually exist on disk.
-    local function storage_with_history(lines)
+    -- No state_path, so state is in memory: these tests are about the decision
+    -- logic, not the file format.
+    --
+    -- The legacy file is removed first because it lives at a path derived from
+    -- sync_dir, which is shared with the migration tests below AND persists in the
+    -- system temp directory between runs. Without this, a leftover file from an
+    -- earlier run gets migrated here and a "new" page reports as already synced --
+    -- an intermittent failure that depends on what ran previously.
+    local function fresh(existing_files)
         local s = Storage:new(tmpdir)
-        local f = assert(io.open(s.synced_ids_file, "w"))
-        f:write(lines)
-        f:close()
+        os.remove(s.synced_ids_file)
+        s:loadState()
+        -- outputExists hits the real filesystem; stub it for predictability.
+        s.outputExists = function(_, filename)
+            return (existing_files or {})[filename] == true
+        end
         return s
     end
 
-    it("counts_unique_ids", function()
-        local s = storage_with_history("aaa:epub\nbbb:epub\nccc:epub\n")
-        assert_eq(s:countSyncedIds(), 3)
+    it("a_page_never_seen_is_new", function()
+        local s = fresh()
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should)
+        assert_eq(reason, "new")
     end)
 
-    it("deduplicates_repeated_appends", function()
-        local s = storage_with_history("aaa:epub\naaa:epub\naaa:epub\nbbb:epub\n")
-        assert_eq(s:countSyncedIds(), 2, "append-only file must collapse duplicates")
+    it("an_unchanged_page_is_skipped", function()
+        local s = fresh { ["a.epub"] = true }
+        s:recordSynced("p1", "T1", "a.epub")
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_false(should)
+        assert_eq(reason, "unchanged")
     end)
 
-    it("ignores_blank_lines_and_whitespace", function()
-        local s = storage_with_history("aaa:epub\n\n  bbb:epub  \n\n")
-        assert_eq(s:countSyncedIds(), 2)
+    -- The headline behaviour: a Notion edit changes last_edited_time.
+    it("an_edited_page_is_resynced", function()
+        local s = fresh { ["a.epub"] = true }
+        s:recordSynced("p1", "2026-01-01T00:00:00.000Z", "a.epub")
+        local should, reason = s:shouldSync("p1", "2026-02-02T00:00:00.000Z", "a.epub", "DB")
+        assert_true(should)
+        assert_eq(reason, "edited")
     end)
 
-    it("reports_zero_for_missing_file", function()
-        local s = Storage:new(tmpdir .. "/definitely_does_not_exist_" .. tostring(os.time()))
-        assert_eq(s:countSyncedIds(), 0)
+    -- Checked before the timestamp: a deleted book must come back even if Notion
+    -- says nothing changed.
+    it("a_deleted_file_is_resynced_even_when_unchanged", function()
+        local s = fresh {}
+        s:recordSynced("p1", "T1", "a.epub")
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should)
+        assert_eq(reason, "missing")
     end)
 
-    it("clearSyncHistory_empties_it", function()
-        local s = storage_with_history("aaa:epub\nbbb:epub\n")
+    it("comparison_is_exact_string_equality", function()
+        local s = fresh { ["a.epub"] = true }
+        s:recordSynced("p1", "2026-01-01T00:00:00.000Z", "a.epub")
+        -- Same instant, different serialisation: treated as changed rather than
+        -- parsed, which is the deliberate trade for having no date handling.
+        local should = s:shouldSync("p1", "2026-01-01T00:00:00Z", "a.epub", "DB")
+        assert_true(should)
+    end)
+
+    it("counts_recorded_pages", function()
+        local s = fresh()
+        assert_eq(s:countSyncedPages(), 0)
+        s:recordSynced("p1", "T1", "a.epub")
+        s:recordSynced("p2", "T2", "b.epub")
+        assert_eq(s:countSyncedPages(), 2)
+    end)
+
+    -- `nil` must not mean two things. If a recorded page has no timestamp -- the
+    -- last sync could not determine one -- adopting it would freeze that page
+    -- forever, because every later comparison would take the same branch and
+    -- never notice an edit.
+    it("a_recorded_page_with_no_timestamp_resyncs_rather_than_freezing", function()
+        local s = fresh { ["a.epub"] = true }
+        s:recordSynced("p1", nil, "a.epub")
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should, "an unknown timestamp must not be treated as up to date")
+        assert_eq(reason, "edited")
+    end)
+
+    it("only_a_migrated_record_is_adopted", function()
+        local s = fresh { ["a.epub"] = true }
+        -- Explicit flag, not an absent timestamp.
+        s.pages["p1"] = { migrated = true }
+        local _, migrated_reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_eq(migrated_reason, "adopted")
+
+        s.pages["p2"] = { last_edited = nil }
+        local _, unknown_reason = s:shouldSync("p2", "T1", "a.epub", "DB")
+        assert_eq(unknown_reason, "edited")
+    end)
+
+    it("clearing_forgets_everything", function()
+        local s = fresh { ["a.epub"] = true }
+        s:recordSynced("p1", "T1", "a.epub")
         assert_true(s:clearSyncHistory())
-        assert_eq(s:countSyncedIds(), 0)
+        assert_eq(s:countSyncedPages(), 0)
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should)
+        assert_eq(reason, "new")
+    end)
+end)
+
+-- Upgrading must not re-download the whole library. The old file had no
+-- timestamps, so "unknown" is adopted rather than treated as stale.
+describe("legacyMigration", function()
+    local tmpdir = (os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"):gsub("\\", "/")
+
+    -- Takes a LIST of legacy keys and joins them with newlines here, rather than
+    -- embedding escape sequences in each test.
+    local function with_legacy(keys, existing_files)
+        local s = Storage:new(tmpdir)
+        local f = assert(io.open(s.synced_ids_file, "w"))
+        for _, key in ipairs(keys) do
+            f:write(key)
+            f:write(string.char(10))
+        end
+        f:close()
+        s:loadState()
+        s.outputExists = function(_, filename)
+            return (existing_files or {})[filename] == true
+        end
+        return s
+    end
+
+    it("imports_legacy_ids", function()
+        local s = with_legacy { "p1:epub", "p2:epub" }
+        assert_eq(s:countSyncedPages(), 2)
     end)
 
-    it("getSyncedIds_returns_a_set_keyed_by_id", function()
-        local s = storage_with_history("aaa:epub\nbbb:epub\n")
-        local set = s:getSyncedIds()
-        assert_true(set["aaa:epub"])
-        assert_true(set["bbb:epub"])
-        assert_eq(set["ccc:epub"], nil)
+    it("strips_the_format_suffix", function()
+        local s = with_legacy({ "p1:epub" }, { ["a.epub"] = true })
+        local should = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_false(should, "the legacy record for p1 should be recognised")
+    end)
+
+    it("deduplicates_the_append_only_file", function()
+        local s = with_legacy { "p1:epub", "p1:epub", "p1:epub" }
+        assert_eq(s:countSyncedPages(), 1)
+    end)
+
+    -- The whole point of adoption: an existing book is left alone on upgrade.
+    it("adopts_an_existing_file_instead_of_redownloading", function()
+        local s = with_legacy({ "p1:epub" }, { ["a.epub"] = true })
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_false(should)
+        assert_eq(reason, "adopted")
+    end)
+
+    -- ...but a legacy record whose file is gone must still be fetched.
+    it("does_not_adopt_when_the_file_is_missing", function()
+        local s = with_legacy({ "p1:epub" }, {})
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should)
+        assert_eq(reason, "missing")
+    end)
+
+    -- An old Markdown record maps to the same id, but the .epub is absent so it
+    -- re-syncs anyway.
+    it("a_legacy_markdown_record_still_fetches_the_epub", function()
+        local s = with_legacy({ "p1:md" }, {})
+        local should = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should)
+    end)
+
+    it("once_adopted_and_stamped_an_edit_is_detected", function()
+        local s = with_legacy({ "p1:epub" }, { ["a.epub"] = true })
+        -- The sync loop stamps the current time on adoption.
+        s:recordSynced("p1", "T1", "a.epub")
+        local should, reason = s:shouldSync("p1", "T2", "a.epub", "DB")
+        assert_true(should)
+        assert_eq(reason, "edited")
+    end)
+
+    it("tolerates_no_legacy_file", function()
+        local s = Storage:new(tmpdir .. "/nope_" .. tostring(os.time()))
+        s:loadState()
+        assert_eq(s:countSyncedPages(), 0)
     end)
 end)
 

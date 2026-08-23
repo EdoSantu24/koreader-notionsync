@@ -49,8 +49,12 @@ function NotionSync:init()
     or 200
 
   self.api = NotionAPI:new(self.notion_token)
-  self.storage = NotionStorage:new(self.save_dir)
+  -- Sync state lives in the settings directory, not save_dir, so changing the
+  -- save directory does not throw the history away.
+  self.storage = NotionStorage:new(self.save_dir,
+    DataStorage:getSettingsDir() .. "/notionsync_state.lua")
   self.storage:initialize()
+  self.storage:loadState()
   self.ui.menu:registerToMainMenu(self)
   self:onDispatcherRegisterActions()
 end
@@ -102,9 +106,9 @@ function NotionSync:addToMainMenu(menu_items)
         callback = function() self:showDatabaseSelector() end,
       },
       {
-        -- The plugin skips pages it has already synced and has no
-        -- last_edited_time check, so this is the only way to pick up edits made
-        -- in Notion or to recover from a bad sync.
+        -- Edits in Notion are picked up automatically now, so this is for
+        -- forcing a full rebuild -- after changing something about how pages are
+        -- rendered, or to recover from a bad sync.
         text = _ "Clear sync history",
         callback = function() self:confirmClearSyncHistory() end,
         separator = true,
@@ -291,7 +295,7 @@ function NotionSync:setMaxPages(value)
 end
 
 function NotionSync:confirmClearSyncHistory()
-  local count = self.storage:countSyncedIds()
+  local count = self.storage:countSyncedPages()
   if count == 0 then
     UIManager:show(InfoMessage:new {
       text = _ "Sync history is already empty.",
@@ -348,9 +352,11 @@ function NotionSync:showSaveDirPicker()
       self.settings:saveSetting("save_dir", path)
       self.settings:flush()
 
-      -- Reinitialize storage with new path
-      self.storage = NotionStorage:new(self.save_dir)
+      -- Reinitialize storage with the new path, keeping the same state file.
+      self.storage = NotionStorage:new(self.save_dir,
+        DataStorage:getSettingsDir() .. "/notionsync_state.lua")
       self.storage:initialize()
+      self.storage:loadState()
 
       UIManager:show(InfoMessage:new {
         text = T(_ "Save directory set to: %1", path),
@@ -602,6 +608,7 @@ end
 function NotionSync:runSync(opts)
   local stats = {
     new = 0,
+    updated = 0,
     unchanged = 0,
     failed = 0,
     truncated = 0,
@@ -638,7 +645,6 @@ end
 
 function NotionSync:runSyncLoop(opts, stats, image_manager)
   self.api:resetRetryBudget()
-  local synced_ids = self.storage:getSyncedIds()
 
   self.sync_alive = true
   self.last_tick = nil
@@ -716,7 +722,6 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
             title = title,
             filename = filename,
             database = database,
-            synced_ids = synced_ids,
             image_manager = image_manager,
             stats = stats,
             opts = opts,
@@ -735,6 +740,11 @@ function NotionSync:runSyncLoop(opts, stats, image_manager)
       end
     end
 
+    -- Flushed per database rather than per page or only at the end: a sync that
+    -- dies mid-run then loses at most one database's records instead of all of
+    -- them, without writing to flash on every single page.
+    self.storage:flushState()
+
     if stats.cancelled then break end
   end
 end
@@ -743,15 +753,22 @@ function NotionSync:syncOnePage(ctx)
   local page, title = ctx.page, ctx.title
   local database, stats = ctx.database, ctx.stats
 
-  -- The ":epub" suffix is retained so pages recorded by an earlier version are
-  -- still recognised. Dropping it would silently force a full re-download.
-  local sync_key = page.id .. ":epub"
-  local file_exists = self.storage:outputExists(ctx.filename, database.name)
+  local last_edited = page.last_edited_time
+  local should_sync, reason = self.storage:shouldSync(
+    page.id, last_edited, ctx.filename, database.name)
 
-  if ctx.synced_ids[sync_key] and file_exists then
+  if not should_sync then
     stats.unchanged = stats.unchanged + 1
+    if reason == "adopted" then
+      -- A record migrated from the old format has no known edit time. Stamp the
+      -- current one now, or it would stay unknown forever and an edit would never
+      -- be detected.
+      self.storage:recordSynced(page.id, last_edited, ctx.filename)
+    end
     return
   end
+
+  local is_update = reason == "edited"
 
   local function detail(text)
     return self:progressText(ctx.db_index, ctx.db_count,
@@ -825,9 +842,12 @@ function NotionSync:syncOnePage(ctx)
 
   if build_ok then
     -- Recorded only after the archive was written AND verified.
-    self.storage:markAsSynced(sync_key)
-    ctx.synced_ids[sync_key] = true
-    stats.new = stats.new + 1
+    self.storage:recordSynced(page.id, last_edited, ctx.filename)
+    if is_update then
+      stats.updated = stats.updated + 1
+    else
+      stats.new = stats.new + 1
+    end
   elseif build_err == "cancelled" then
     stats.cancelled = true
   else
@@ -850,7 +870,8 @@ function NotionSync:showSyncReport(stats, image_manager)
     lines[#lines + 1] = _ "Sync complete!"
   end
 
-  lines[#lines + 1] = T(_ "New: %1   Unchanged: %2", stats.new, stats.unchanged)
+  lines[#lines + 1] = T(_ "New: %1   Updated: %2   Unchanged: %3",
+    stats.new, stats.updated, stats.unchanged)
 
   -- An error that escaped the per-page guard aborted the run; say so rather than
   -- letting the counts imply the sync simply finished early.

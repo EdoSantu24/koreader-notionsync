@@ -18,7 +18,7 @@ local Sync = h.load_plugin("main")
 
 local function fake_stats(over)
     local s = {
-        new = 0, unchanged = 0, failed = 0, truncated = 0, partial = 0,
+        new = 0, updated = 0, unchanged = 0, failed = 0, truncated = 0, partial = 0,
         page_limited = 0,
         failed_titles = {}, unsupported = {}, cancelled = false,
     }

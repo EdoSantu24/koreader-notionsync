@@ -1,6 +1,7 @@
 local lfs = require("libs/libkoreader-lfs")
 local ffiUtil = require("ffi/util")
 local util = require("util")
+local LuaSettings = require("luasettings")
 local logger = require("logger")
 
 local NotionStorage = {}
@@ -94,14 +95,159 @@ local function unique_suffixes(group)
     return out, 8
 end
 
-function NotionStorage:new(sync_dir)
+-- state_path is optional; without it sync state is held in memory only, which is
+-- what the tests do.
+function NotionStorage:new(sync_dir, state_path)
     local o = {
         sync_dir = sync_dir,
+        -- The pre-timestamp history file, read once for migration.
         synced_ids_file = ffiUtil.joinPath(sync_dir, ".synced_ids"),
+        state_path = state_path,
+        pages = {},
+        state_dirty = false,
     }
     setmetatable(o, self)
     self.__index = self
     return o
+end
+
+--------------------------------------------------------------------------------
+-- Sync state
+--------------------------------------------------------------------------------
+--
+-- Keyed by Notion page id, holding the page's last_edited_time so an edit in
+-- Notion actually triggers a re-sync. Previously only the id was recorded, so a
+-- page fixed in Notion kept its stale copy forever and "Clear sync history" --
+-- which re-downloads everything -- was the only lever.
+--
+-- Lives in KOReader's settings directory rather than in save_dir, so changing the
+-- save directory does not throw the history away. A missing output file is still
+-- detected separately, so deleting a book always re-syncs it.
+
+-- Reads the state file, migrating the old format on first run.
+function NotionStorage:loadState()
+    -- Whether a state file already had records is tracked explicitly rather than
+    -- inferred from self.pages being nil: new() initialises it to an empty table
+    -- so every other method is safe before loadState, which made the nil test
+    -- silently never fire and skipped migration entirely.
+    local stored = nil
+    if self.state_path then
+        self.state = LuaSettings:open(self.state_path)
+        stored = self.state:readSetting("pages")
+    end
+
+    if stored then
+        self.pages = stored
+    else
+        -- No state file yet, so import the pre-timestamp history if one exists.
+        self.pages = self:migrateLegacyIds()
+        self.state_dirty = true
+        self:flushState()
+    end
+    return self.pages
+end
+
+-- The old format was one "<page_id>:<format>" per line, append-only, with no
+-- timestamps at all.
+--
+-- last_edited is deliberately left nil rather than guessed. Treating "unknown" as
+-- stale would re-download the entire library on upgrade; instead the first sync
+-- ADOPTS whatever Notion currently reports for any page whose file is already
+-- present. The cost is that an edit made before upgrading is missed exactly once,
+-- which is a far better trade than re-fetching everything.
+function NotionStorage:migrateLegacyIds()
+    local pages = {}
+    local file = io.open(self.synced_ids_file, "r")
+    if not file then return pages end
+
+    local count = 0
+    for line in file:lines() do
+        local trimmed = line:match("^%s*(.-)%s*$")
+        if trimmed and trimmed ~= "" then
+            -- Legacy keys were "<id>:<format>"; the format is dropped because
+            -- EPUB is the only output now. An old ":md" record maps to the same
+            -- id, and the missing .epub file makes it re-sync anyway.
+            local id = trimmed:match("^([^:]+)")
+            if id and id ~= "" and not pages[id] then
+                -- Flagged explicitly rather than represented by a missing
+                -- last_edited. A bare nil would be indistinguishable from "we
+                -- recorded this page but learned no timestamp", and that case
+                -- must re-sync, not be adopted forever.
+                pages[id] = { migrated = true }
+                count = count + 1
+            end
+        end
+    end
+    file:close()
+
+    if count > 0 then
+        logger.info("NotionStorage: migrated", count,
+            "sync record(s) with no known edit time; they will be adopted on this sync")
+    end
+    return pages
+end
+
+-- Returns should_sync, reason -- one of new, missing, edited, unchanged, adopted.
+--
+-- The timestamp comparison is exact string equality, deliberately: Notion returns
+-- a canonical ISO 8601 form, so there is nothing to gain from parsing it and no
+-- timezone handling to get wrong. The trade is that the same instant serialised
+-- differently reads as changed, costing one re-download.
+function NotionStorage:shouldSync(page_id, last_edited, filename, database_name)
+    local record = self.pages[page_id]
+    if not record then return true, "new" end
+
+    -- Checked before the timestamp: a deleted book must come back even if Notion
+    -- says nothing changed.
+    if not self:outputExists(filename, database_name) then
+        return true, "missing"
+    end
+
+    -- Imported from the pre-timestamp format: the file is here, so take Notion's
+    -- current timestamp as the baseline instead of re-downloading the library.
+    if record.migrated then
+        return false, "adopted"
+    end
+
+    -- A record with no timestamp that was NOT migrated means the last sync could
+    -- not determine one. Re-syncing is the safe reading: adopting it would freeze
+    -- the page permanently, since every later comparison would take this same
+    -- branch and never notice an edit.
+    if record.last_edited == nil then
+        return true, "edited"
+    end
+
+    if record.last_edited ~= last_edited then
+        return true, "edited"
+    end
+    return false, "unchanged"
+end
+
+function NotionStorage:recordSynced(page_id, last_edited, filename)
+    self.pages[page_id] = {
+        last_edited = last_edited,
+        path = filename,
+        synced_at = os.time(),
+    }
+    self.state_dirty = true
+end
+
+function NotionStorage:flushState()
+    if not self.state_dirty then return false end
+    if not self.state then
+        self.state_dirty = false
+        return false
+    end
+    self.state:saveSetting("pages", self.pages)
+    self.state:flush()
+    self.state_dirty = false
+    return true
+end
+
+function NotionStorage:countSyncedPages()
+    local count = 0
+    for _ in pairs(self.pages) do count = count + 1 end
+    return count
 end
 
 function NotionStorage:ensureDirectory(path)
@@ -118,48 +264,22 @@ function NotionStorage:initialize()
     self:ensureDirectory(self.sync_dir)
 end
 
-function NotionStorage:getSyncedIds()
-    local synced = {}
-    local file = io.open(self.synced_ids_file, "r")
-    if file then
-        for line in file:lines() do
-            local trimmed = line:match("^%s*(.-)%s*$") -- Trim whitespace
-            if trimmed and trimmed ~= "" then
-                synced[trimmed] = true
-            end
-        end
-        file:close()
-    end
-    return synced
-end
-
-function NotionStorage:countSyncedIds()
-    local count = 0
-    for _ in pairs(self:getSyncedIds()) do
-        count = count + 1
-    end
-    return count
-end
-
-function NotionStorage:markAsSynced(page_id)
-    local file = io.open(self.synced_ids_file, "a")
-    if file then
-        file:write(page_id .. "\n")
-        file:close()
-    end
-end
-
+-- Forgets every record, so the next sync re-downloads everything. The output
+-- files themselves are left alone and will simply be overwritten.
 function NotionStorage:clearSyncHistory()
-    local file, err = io.open(self.synced_ids_file, "w")
-    if not file then
-        -- Surfaced to the user, so it must also be diagnosable: on-device there
-        -- is no way to inspect state interactively, only crash.log after the fact.
-        logger.warn("NotionStorage: Could not clear sync history at",
-            self.synced_ids_file, "--", tostring(err))
+    self.pages = {}
+    self.state_dirty = true
+
+    if not self.state then return true end
+
+    local ok, err = pcall(function() self:flushState() end)
+    if not ok then
+        -- Surfaced to the user, so it must also be diagnosable: on-device there is
+        -- no way to inspect state interactively, only crash.log after the fact.
+        logger.warn("NotionStorage: could not clear sync history:", tostring(err))
         return false, err
     end
-    file:close()
-    logger.info("NotionStorage: Cleared sync history at", self.synced_ids_file)
+    logger.info("NotionStorage: cleared sync history")
     return true
 end
 
