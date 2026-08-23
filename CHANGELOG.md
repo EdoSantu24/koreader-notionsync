@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Editing a page in Notion now re-downloads it.** Sync state records each page's
+  `last_edited_time`, so an edit is detected automatically. Previously only the
+  page id was stored, so a page fixed in Notion kept its stale copy forever and
+  *Clear sync history* -- which re-downloads everything -- was the only lever
+- The sync summary now distinguishes **New / Updated / Unchanged**
+- Sync state moved to KOReader's settings directory, so changing the save
+  directory no longer discards the history. Existing `.synced_ids` records are
+  imported automatically; because that format had no timestamps, pages whose files
+  are already present are adopted as up to date rather than re-downloaded, so
+  upgrading costs nothing. An edit made before upgrading is missed once
+
 - **All databases, and all pages in a database, are now synced.** Nothing followed
   a cursor before, so only the first 20 databases and the first 20 pages of each
   existed as far as the plugin was concerned -- with no indication anything had

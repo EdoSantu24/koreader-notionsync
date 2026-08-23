@@ -106,13 +106,33 @@ fatal. `/v1/search` gets no sort at all — its options are narrow and a wrong k
 is a 400 that would break the database picker, so the picker sorts by name
 client-side.
 
-### Sync history
+### Sync state
 
-`<save_dir>/.synced_ids` is an append-only newline-delimited file of keys shaped `<page_id>:epub`. A page is re-fetched if its key is absent *or* the expected output file is missing.
+`<settings dir>/notionsync_state.lua` (a `LuaSettings` file), keyed by Notion page
+id: `{ last_edited, path, synced_at }`.
 
-The `:epub` suffix is now a constant, kept only so that pages recorded by an earlier version (which put the output format there) are still recognised. Don't "tidy" it away without a migration — dropping it silently forces a full re-download of every page.
+It lives in the settings directory, **not** in `save_dir`, so changing the save
+directory does not throw the history away. A missing output file is detected
+separately, so deleting a book always re-syncs it regardless of timestamps.
 
-There is no content-hash or `last_edited_time` check, so **edits in Notion never trigger a re-sync**. `Clear sync history` in the menu is the only way to force one.
+`storage:shouldSync(page_id, last_edited, filename, database_name)` returns
+`should_sync, reason` where reason is one of `new`, `missing`, `edited`,
+`unchanged`, `adopted`. Comparison is **exact string equality** on
+`last_edited_time` — Notion returns a canonical ISO 8601 form, so there is nothing
+to gain from parsing it and no timezone handling to get wrong. The trade is that
+the same instant serialised differently reads as changed, which costs one
+re-download and is tested.
+
+**Migration from the old format.** The previous `<save_dir>/.synced_ids` was
+append-only and recorded ids only, with no timestamps. Those records import with
+`last_edited = nil`, and `shouldSync` returns `adopted` for them when the file
+exists — the sync loop then stamps the current timestamp. Treating "unknown" as
+stale instead would re-download the entire library on upgrade. The cost is that an
+edit made *before* upgrading is missed exactly once.
+
+State is flushed **per database**, not per page and not only at the end: a sync
+that dies mid-run loses at most one database's records rather than all of them,
+without writing to flash on every page.
 
 ### On-device layout
 
@@ -165,10 +185,6 @@ are load-bearing: structural containers (`table`, `column_list`, `column`,
 allowance on structure and arrives with no rows; and `child_page` is never
 recursed into, since that is a separate document and would pull in an unbounded
 subtree.
-
-**Edits in Notion never re-sync.** Sync state is keyed on page id alone, with no
-`last_edited_time` comparison, so a page fixed in Notion keeps its stale copy
-forever. `Clear sync history` in the menu is the only way to force a refresh.
 
 **Lua trap worth knowing.** `cond and nil or 5` always evaluates to `5`, because
 `and nil` is falsy and falls through to the `or`. This shipped twice in the sync
