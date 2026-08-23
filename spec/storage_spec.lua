@@ -292,6 +292,30 @@ describe("syncState", function()
         assert_eq(s:countSyncedPages(), 2)
     end)
 
+    -- `nil` must not mean two things. If a recorded page has no timestamp -- the
+    -- last sync could not determine one -- adopting it would freeze that page
+    -- forever, because every later comparison would take the same branch and
+    -- never notice an edit.
+    it("a_recorded_page_with_no_timestamp_resyncs_rather_than_freezing", function()
+        local s = fresh { ["a.epub"] = true }
+        s:recordSynced("p1", nil, "a.epub")
+        local should, reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_true(should, "an unknown timestamp must not be treated as up to date")
+        assert_eq(reason, "edited")
+    end)
+
+    it("only_a_migrated_record_is_adopted", function()
+        local s = fresh { ["a.epub"] = true }
+        -- Explicit flag, not an absent timestamp.
+        s.pages["p1"] = { migrated = true }
+        local _, migrated_reason = s:shouldSync("p1", "T1", "a.epub", "DB")
+        assert_eq(migrated_reason, "adopted")
+
+        s.pages["p2"] = { last_edited = nil }
+        local _, unknown_reason = s:shouldSync("p2", "T1", "a.epub", "DB")
+        assert_eq(unknown_reason, "edited")
+    end)
+
     it("clearing_forgets_everything", function()
         local s = fresh { ["a.epub"] = true }
         s:recordSynced("p1", "T1", "a.epub")

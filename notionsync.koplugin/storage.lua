@@ -169,7 +169,11 @@ function NotionStorage:migrateLegacyIds()
             -- id, and the missing .epub file makes it re-sync anyway.
             local id = trimmed:match("^([^:]+)")
             if id and id ~= "" and not pages[id] then
-                pages[id] = { last_edited = nil }
+                -- Flagged explicitly rather than represented by a missing
+                -- last_edited. A bare nil would be indistinguishable from "we
+                -- recorded this page but learned no timestamp", and that case
+                -- must re-sync, not be adopted forever.
+                pages[id] = { migrated = true }
                 count = count + 1
             end
         end
@@ -183,7 +187,12 @@ function NotionStorage:migrateLegacyIds()
     return pages
 end
 
--- Returns should_sync, reason.
+-- Returns should_sync, reason -- one of new, missing, edited, unchanged, adopted.
+--
+-- The timestamp comparison is exact string equality, deliberately: Notion returns
+-- a canonical ISO 8601 form, so there is nothing to gain from parsing it and no
+-- timezone handling to get wrong. The trade is that the same instant serialised
+-- differently reads as changed, costing one re-download.
 function NotionStorage:shouldSync(page_id, last_edited, filename, database_name)
     local record = self.pages[page_id]
     if not record then return true, "new" end
@@ -194,17 +203,26 @@ function NotionStorage:shouldSync(page_id, last_edited, filename, database_name)
         return true, "missing"
     end
 
-    if record.last_edited == nil then
+    -- Imported from the pre-timestamp format: the file is here, so take Notion's
+    -- current timestamp as the baseline instead of re-downloading the library.
+    if record.migrated then
         return false, "adopted"
     end
+
+    -- A record with no timestamp that was NOT migrated means the last sync could
+    -- not determine one. Re-syncing is the safe reading: adopting it would freeze
+    -- the page permanently, since every later comparison would take this same
+    -- branch and never notice an edit.
+    if record.last_edited == nil then
+        return true, "edited"
+    end
+
     if record.last_edited ~= last_edited then
         return true, "edited"
     end
     return false, "unchanged"
 end
 
--- String comparison, deliberately: Notion returns a canonical ISO 8601 form, so
--- there is nothing to gain from parsing it and no timezone handling to get wrong.
 function NotionStorage:recordSynced(page_id, last_edited, filename)
     self.pages[page_id] = {
         last_edited = last_edited,

@@ -124,9 +124,11 @@ the same instant serialised differently reads as changed, which costs one
 re-download and is tested.
 
 **Migration from the old format.** The previous `<save_dir>/.synced_ids` was
-append-only and recorded ids only, with no timestamps. Those records import with
-`last_edited = nil`, and `shouldSync` returns `adopted` for them when the file
-exists — the sync loop then stamps the current timestamp. Treating "unknown" as
+append-only and recorded ids only, with no timestamps. Those records import with an
+explicit `migrated = true` flag -- **not** an absent `last_edited`, which would be
+indistinguishable from "recorded but no timestamp known", a case that must
+re-sync rather than be adopted forever -- and `shouldSync` returns `adopted` for
+them when the file exists — the sync loop then stamps the current timestamp. Treating "unknown" as
 stale instead would re-download the entire library on upgrade. The cost is that an
 edit made *before* upgrading is missed exactly once.
 
