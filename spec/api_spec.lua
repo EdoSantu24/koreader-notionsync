@@ -70,6 +70,41 @@ describe("retry_budget", function()
             "an unbounded backoff makes a rate-limited sync run forever")
     end)
 
+    -- The generous ceiling is only defensible because the wait can be cancelled.
+    -- Paths with no abort hook -- the database picker calls getAllDatabases with
+    -- none, and has no Trapper widget to dismiss either -- are as uninterruptible
+    -- as they ever were, so they keep the conservative cap. Applying the larger
+    -- one there would have TRIPLED the worst-case frozen UI.
+    it("keeps_a_tighter_ceiling_where_the_wait_cannot_be_cancelled", function()
+        assert_true(API.MAX_TOTAL_RETRY_SLEEP_UNCANCELLABLE
+            < API.MAX_TOTAL_RETRY_SLEEP,
+            "an uninterruptible wait must not use the cancellable budget")
+        assert_true(API.MAX_TOTAL_RETRY_SLEEP_UNCANCELLABLE <= 20)
+    end)
+
+    it("spends_at_most_the_uncancellable_budget_with_no_hook", function()
+        h.slept = 0
+        local api = API:new("token")
+        api.requestOnce = function() return 429, {} end
+        api:resetRetryBudget()
+        -- No should_abort: this is the database-picker path.
+        for _ = 1, 40 do api:apiCall("GET", "/v1/search") end
+        assert_true(h.slept <= API.MAX_TOTAL_RETRY_SLEEP_UNCANCELLABLE,
+            "slept " .. tostring(h.slept) .. "s with no way to cancel it")
+    end)
+
+    it("allows_the_larger_budget_once_a_hook_exists", function()
+        h.slept = 0
+        local api = API:new("token")
+        api.requestOnce = function() return 429, {} end
+        api.should_abort = function() return false end
+        api:resetRetryBudget()
+        for _ = 1, 40 do api:apiCall("GET", "/v1/search") end
+        assert_true(h.slept > API.MAX_TOTAL_RETRY_SLEEP_UNCANCELLABLE,
+            "a cancellable wait should be allowed past the tight cap")
+        assert_true(h.slept <= API.MAX_TOTAL_RETRY_SLEEP)
+    end)
+
     it("attempts_are_bounded", function()
         assert_true(API.MAX_ATTEMPTS >= 2 and API.MAX_ATTEMPTS <= 4)
     end)

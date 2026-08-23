@@ -26,11 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The total retry backoff ceiling rose from 20s to 60s per sync. The old value
-  was low because the sleep could not be interrupted, so it doubled as a limit on
-  how long the device could be frozen with no escape; now that the wait is
-  cancellable the cap only bounds total slowness, and a rate-limited sync is more
-  likely to finish a page than give up on it.
+- The total retry backoff ceiling rose from 20s to 60s **during a sync**, where
+  the wait can now be cancelled: the old value was low because the sleep could
+  not be interrupted, so it doubled as a limit on how long the device could be
+  frozen with no escape. A rate-limited sync is now more likely to finish a page
+  than give up on it. Requests made outside a sync — loading the database picker —
+  keep the 20s ceiling, because nothing there can interrupt the wait.
+
+### Known limitation
+
+- Image downloads still pause without repainting when a transient network error
+  forces a retry (up to 3s per image). This is the same blocking-sleep pattern,
+  in `imagemanager.lua`, and it is not addressed here.
 
 ## [2.0.0] - 2026-08-23
 

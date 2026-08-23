@@ -25,13 +25,18 @@ end
 -- easily and a bare failure would silently cost a table or a whole subtree.
 NotionAPI.MAX_ATTEMPTS = 3
 
--- Backoff is sliced and cancellable (see waitFor), so this ceiling now exists
--- only to stop a rate-limited sync running unboundedly long. It used to exist to
--- bound how long the device could be frozen with no escape, which is why it was
--- set as low as 20s; waiting is now merely slow, and the user can stop it at any
--- point. Once spent, requests still happen -- they just stop waiting between
--- attempts.
+-- Two ceilings, because the tolerable wait depends entirely on whether the user
+-- can escape it.
+--
+-- With an abort hook installed (a sync, via runSyncLoop) the backoff is sliced
+-- and cancellable, so the cap only bounds total slowness and can afford to be
+-- generous. Without one the wait is exactly as uninterruptible as it always was,
+-- and the original conservative ceiling still applies: getAllDatabases is called
+-- from the database picker with no hook and no Trapper widget to dismiss, so
+-- using the larger cap there would have TRIPLED the worst-case frozen UI -- the
+-- precise thing the 20s value existed to prevent.
 NotionAPI.MAX_TOTAL_RETRY_SLEEP = 60
+NotionAPI.MAX_TOTAL_RETRY_SLEEP_UNCANCELLABLE = 20
 
 -- socket.sleep blocks KOReader's event loop for its entire duration: nothing
 -- repaints, and Trapper never sees a dismiss tap, which on e-ink is
@@ -89,7 +94,12 @@ function NotionAPI:apiCall(method, endpoint, body)
 
         if attempt < self.MAX_ATTEMPTS then
             local spent = self.retry_sleep_spent or 0
-            local delay = math.min(attempt, self.MAX_TOTAL_RETRY_SLEEP - spent)
+            -- Written as a statement, not `cond and a or b`: that idiom has
+            -- already shipped a bug in this codebase, and it is only safe while
+            -- the middle value stays truthy.
+            local ceiling = self.MAX_TOTAL_RETRY_SLEEP_UNCANCELLABLE
+            if self.should_abort then ceiling = self.MAX_TOTAL_RETRY_SLEEP end
+            local delay = math.min(attempt, ceiling - spent)
             if delay > 0 then
                 self.retry_sleep_spent = spent + delay
                 logger.warn("NotionAPI:", tostring(code), "on", endpoint,
