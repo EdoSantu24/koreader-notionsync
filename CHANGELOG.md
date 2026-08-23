@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-23
+
+A rebuild of the EPUB pipeline. Synced books previously arrived with no images, no
+tables, and parts of the page silently missing; all three are fixed at the source
+rather than patched around. Along the way this release removes several caps that
+quietly limited what got synced at all, and adds the ability to cancel a sync.
+
+### The three problems this release fixes
+
+**Images never appeared.** Pages were converted to Markdown, run through a bundled
+Markdown parser, and turned into HTML. That parser escaped `&` to `&amp;` when
+writing an image URL into `src="..."`, while the code substituting the local file
+path searched for the raw URL. Notion image links are full of `&`, so the
+substitution never matched and every book shipped a link to a Notion URL that had
+already expired. Notion blocks are now rendered directly to XHTML, so there is no
+text substitution left to get wrong.
+
+**Tables were empty.** Notion stores table rows as *child blocks*, fetched with a
+separate request per parent, and the plugin never made those requests. The same
+was true of nested bullet levels and the contents of toggles, callouts and
+columns. All of it is now fetched, within a configurable request budget.
+
+**Content went missing without warning.** Only the first 20 databases and the first
+20 pages of each were ever read, in an order that could change between runs. Any
+Notion block the converter did not recognise was dropped with no trace. Every one
+of those limits is now either removed or reported in the sync summary.
+
+### Upgrading
+
+Nothing needs doing, but three things change:
+
+- **Markdown output is gone.** EPUB is the only format. If you used `.md` output,
+  those files stay on the device and each page re-downloads once as EPUB.
+- **Sync history is imported automatically.** Books already on the device are
+  recognised and *not* re-downloaded. The old format had no timestamps, so an edit
+  made in Notion before upgrading is missed once; after that, edits are detected.
+- **A few filenames may change.** Pages whose titles collide, or use non-Latin
+  characters, are named correctly now — so the old file is left behind and a
+  correctly named one appears. Safe to delete the leftovers.
+
 ### Added
 
 - **Editing a page in Notion now re-downloads it.** Sync state records each page's
