@@ -63,7 +63,8 @@ A KOReader plugin that syncs Notion databases to your eReader for offline readin
 2. Navigate to **Tools** → **NotionSync**
 3. Tap **Sync Now**
 4. Wait for the sync to complete
-5. Your Notion pages will be saved to the configured directory (default: `/mnt/onboard/notion_sync/`)
+5. Your Notion pages will be saved to the configured directory (default:
+   `/mnt/us/notion_sync/` on Kindle, `/mnt/onboard/notion_sync/` on Kobo)
 
 ### Output Format
 

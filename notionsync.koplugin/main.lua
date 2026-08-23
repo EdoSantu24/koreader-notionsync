@@ -9,6 +9,7 @@ local WidgetContainer = require "ui/widget/container/widgetcontainer"
 local NetworkMgr = require "ui/network/manager"
 local Trapper = require "ui/trapper"
 local DataStorage = require "datastorage"
+local Device = require "device"
 local LuaSettings = require "luasettings"
 local logger = require "logger"
 local util = require "util"
@@ -29,12 +30,32 @@ local NotionSync = WidgetContainer:extend {
   is_doc_only = false,
 }
 
+-- Where books land on a fresh install.
+--
+-- This used to be the literal Kobo path "/mnt/onboard/notion_sync", which on a
+-- Kindle does not exist. The directory creation would then fall through to
+-- `mkdir -p` and, on a device with a writable rootfs, succeed -- putting the
+-- library somewhere invisible over USB, on a tiny partition, liable to be wiped by
+-- a firmware update.
+--
+-- Device.home_dir is the portable answer: /mnt/us on Kindle, /mnt/onboard on Kobo,
+-- and nil on desktop builds -- hence the fall back to KOReader's own data
+-- directory, which is what the bundled newsdownloader plugin does.
+function NotionSync.defaultSaveDir()
+  if type(Device.home_dir) == "string" and Device.home_dir ~= "" then
+    return Device.home_dir .. "/notion_sync"
+  end
+  return DataStorage:getFullDataDir() .. "/notion_sync"
+end
+
 function NotionSync:init()
   self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/notionsync.lua")
   self.notion_token = self.settings:readSetting "notion_token"
 
   self.selected_databases = self.settings:readSetting "selected_databases" or {}
-  self.save_dir = self.settings:readSetting "save_dir" or "/mnt/onboard/notion_sync"
+  -- A default only: an explicitly chosen save directory is never overridden, so
+  -- upgrading cannot move anyone's library out from under them.
+  self.save_dir = self.settings:readSetting "save_dir" or NotionSync.defaultSaveDir()
   -- Nested-block fetching costs one API request per parent, so these bound how
   -- long a single page can take. Raising the budget fetches more of a deeply
   -- nested page at the cost of sync time and battery.

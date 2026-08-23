@@ -60,6 +60,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The default save directory now works on a Kindle.** It was the literal Kobo
+  path `/mnt/onboard/notion_sync`, which does not exist there; directory creation
+  then fell through to a shell `mkdir -p` which, on a device with a writable
+  rootfs, *succeeded* -- putting the library on the root filesystem, invisible over
+  USB and liable to be wiped by a firmware update. Now derived from
+  `Device.home_dir`. **Only the default changed:** a save directory you chose
+  explicitly is never overridden. If you never set one, books will now appear under
+  `/mnt/us/notion_sync` on Kindle; the old directory is left in place to delete
+- Directory creation no longer shells out. `os.execute("mkdir -p " .. path)` was
+  unquoted, so any save directory containing a space created two wrong directories
+  instead of one, and its result was discarded so the failure was invisible
+
 - **Non-Latin page titles no longer collapse into a single `untitled.epub`.** The
   filename sanitiser kept only `[%w%s-_]`, and because Lua patterns are
   byte-oriented and `%w` is ASCII-only, every byte >= 0x80 was deleted: a page

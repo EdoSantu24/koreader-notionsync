@@ -40,6 +40,57 @@ end
 
 --------------------------------------------------------------------------------
 
+-- The old default was the literal Kobo path "/mnt/onboard/notion_sync", which
+-- does not exist on a Kindle. Directory creation then fell through to
+-- `mkdir -p` and, on a writable rootfs, succeeded -- putting the library
+-- somewhere invisible over USB and liable to be wiped by a firmware update.
+describe("defaultSaveDir", function()
+    local original = h.device.home_dir
+    local function with_home(value, fn)
+        h.device.home_dir = value
+        local ok, err = pcall(fn)
+        h.device.home_dir = original
+        if not ok then error(err, 0) end
+    end
+
+    -- The branch every real user takes, and the reason this change exists.
+    it("uses_the_kindle_home_directory", function()
+        with_home("/mnt/us", function()
+            assert_eq(Sync.defaultSaveDir(), "/mnt/us/notion_sync")
+        end)
+    end)
+
+    it("uses_the_kobo_home_directory", function()
+        with_home("/mnt/onboard", function()
+            assert_eq(Sync.defaultSaveDir(), "/mnt/onboard/notion_sync")
+        end)
+    end)
+
+    -- generic/device.lua sets home_dir = nil, which is what a desktop build looks
+    -- like. The path must still be absolute and usable.
+    it("falls_back_when_the_device_reports_no_home", function()
+        with_home(nil, function()
+            local dir = Sync.defaultSaveDir()
+            assert_match(dir, "^/")
+            assert_match(dir, "notion_sync$")
+        end)
+    end)
+
+    it("falls_back_on_an_empty_home", function()
+        with_home("", function()
+            assert_match(Sync.defaultSaveDir(), "notion_sync$")
+        end)
+    end)
+
+    -- The bug: a Kobo path baked in regardless of the device it runs on.
+    it("is_not_hardcoded_to_one_platform", function()
+        local kindle, kobo
+        with_home("/mnt/us", function() kindle = Sync.defaultSaveDir() end)
+        with_home("/mnt/onboard", function() kobo = Sync.defaultSaveDir() end)
+        assert_true(kindle ~= kobo, "the default must follow the device")
+    end)
+end)
+
 describe("progressText", function()
     -- The invariant fast_refresh depends on.
     it("always_produces_three_lines", function()

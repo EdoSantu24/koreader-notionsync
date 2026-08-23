@@ -58,16 +58,24 @@ M.logger = logger
 -- util: the handful of helpers the plugin actually uses
 --------------------------------------------------------------------------------
 
+-- Forward declaration: util.pathExists below is defined in terms of lfs, which is
+-- built further down. Without this the name would resolve to a nil global.
+local lfs
+
 local util = {}
 
+-- Mirrors frontend/util.lua: both of these are defined in terms of lfs, not
+-- io.open. io.open on a directory succeeds on Linux and fails on Windows, so a
+-- stub built on it would behave differently per platform.
 function util.pathExists(path)
-    local f = io.open(path, "r")
-    if f then f:close() return true end
-    return false
+    return lfs.attributes(path, "mode") ~= nil
 end
 
+-- The real one is recursive and returns truthy on success, or nil plus a message.
+-- Note `err` can be nil even on failure, so callers must not assume a message.
 function util.makePath(path)
     M.made_paths[#M.made_paths + 1] = path
+    M.fake_fs[path] = "directory"
     return true
 end
 
@@ -97,6 +105,11 @@ end
 M.util = util
 M.made_paths = {}
 
+-- Device.home_dir is /mnt/us on Kindle, /mnt/onboard on Kobo, and nil on generic
+-- desktop builds. Defaults to the Kindle value because that is the target device;
+-- tests set M.device.home_dir directly to exercise the other branches.
+M.device = { home_dir = "/mnt/us" }
+
 --------------------------------------------------------------------------------
 -- lfs: no real luafilesystem available locally, so this is a programmable fake.
 -- Tests set M.fake_fs = { ["/some/path"] = "directory", ... } as needed.
@@ -104,7 +117,7 @@ M.made_paths = {}
 
 M.fake_fs = {}
 
-local lfs = {}
+lfs = {}
 
 function lfs.attributes(path, what)
     local mode = M.fake_fs[path]
@@ -450,6 +463,7 @@ local LuaSettings = {
 --------------------------------------------------------------------------------
 
 package.preload["logger"] = function() return logger end
+package.preload["device"] = function() return M.device end
 package.preload["ltn12"] = function() return ltn12 end
 package.preload["socket"] = function() return socket end
 package.preload["socket.http"] = function() return http end
