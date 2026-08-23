@@ -140,8 +140,7 @@ jobs:
 
           {
             echo "CHANGELOG<<CHANGELOG_EOF"
-            printf '%s
-' "$BODY"
+            echo "$BODY"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
