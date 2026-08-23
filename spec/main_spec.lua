@@ -329,6 +329,29 @@ describe("runSync_teardown", function()
         run_with_failing_loop()
         assert_eq(h.shown[#h.shown].timeout, nil)
     end)
+
+    -- The teardown exists to run when things went wrong, so it must not itself
+    -- throw. It clears api.should_abort, and a sync can die before an api exists.
+    it("survives_a_teardown_with_no_api", function()
+        local s = run_with_failing_loop()
+        assert_eq(s.api, nil)
+    end)
+
+    -- A stale hook left on the api would see sync_alive false from the finished
+    -- sync and abort the next network call -- the database picker, with no sync
+    -- running at all.
+    it("clears_the_retry_abort_hook_even_when_the_loop_throws", function()
+        h.shown = {}
+        local api = { should_abort = function() return false end }
+        local s = setmetatable({
+            selected_databases = {},
+            api = api,
+            runSyncLoop = function() error("boom") end,
+        }, { __index = Sync })
+        s:runSync {}
+        assert_eq(api.should_abort, nil,
+            "a stale abort hook would break the next non-sync request")
+    end)
 end)
 
 describe("tick", function()
@@ -371,5 +394,78 @@ describe("tick", function()
         -- Once cancelled it must stop reporting alive even for a forced tick.
         h.Trapper.cancel_after = nil
         assert_false(s:tick("b", true))
+    end)
+
+    it("remembers_the_last_text_so_a_retry_wait_can_repaint_it", function()
+        local s = fresh()
+        s:tick("three lines", true)
+        assert_eq(s.last_tick_text, "three lines")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- retry abort hook
+--------------------------------------------------------------------------------
+
+-- api.lua slices its backoff and calls should_abort between slices. That hook
+-- has to go through tick, not read sync_alive directly: Trapper:info is BOTH the
+-- repaint and the dismiss check, so a hook that only read the flag would leave
+-- the sync interruptible in principle while never noticing the interruption.
+describe("retry_abort_hook", function()
+    local function wired()
+        h.Trapper.resetRecorder()
+        local api = { resetRetryBudget = function() end }
+        local s = setmetatable({
+            api = api,
+            selected_databases = {},
+        }, { __index = Sync })
+        -- runSyncLoop wires the hook before touching the database list, so an
+        -- empty list is enough to reach it.
+        s:runSyncLoop({}, { failed = 0 }, nil)
+        return s, api
+    end
+
+    it("is_installed_by_the_sync_loop", function()
+        local _, api = wired()
+        assert_eq(type(api.should_abort), "function")
+    end)
+
+    it("reports_no_abort_while_the_sync_is_alive", function()
+        local s, api = wired()
+        s.sync_alive = true
+        s:tick("progress", true)
+        assert_false(api.should_abort())
+    end)
+
+    it("reports_abort_once_the_sync_is_cancelled", function()
+        local s, api = wired()
+        s.sync_alive = false
+        assert_true(api.should_abort())
+    end)
+
+    -- Before the first tick there is no text to repaint. Ticking with an empty
+    -- string would change the widget's shape and ghost on e-ink, so the hook
+    -- falls back to reading the flag.
+    it("does_not_repaint_before_the_first_tick", function()
+        local s, api = wired()
+        s.sync_alive = true
+        s.last_tick_text = nil
+        local before = #h.Trapper.infos
+        assert_false(api.should_abort())
+        assert_eq(#h.Trapper.infos, before,
+            "must not paint a widget with no text to paint")
+    end)
+
+    -- The hook goes through tick, so a dismiss during a retry wait is seen and
+    -- latches, exactly as it does between pages.
+    it("notices_a_dismiss_arriving_during_a_wait", function()
+        local s, api = wired()
+        s.sync_alive = true
+        s:tick("progress", true)
+        s.last_tick = nil            -- let the next tick through the throttle
+        h.Trapper.cancel_after = 1
+        assert_true(api.should_abort())
+        assert_false(s.sync_alive, "the cancellation must latch")
+        h.Trapper.cancel_after = nil
     end)
 end)
